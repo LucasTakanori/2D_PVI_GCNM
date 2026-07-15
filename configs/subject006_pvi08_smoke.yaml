@@ -1,0 +1,29 @@
+pvi_solver_root: "../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver"
+mesh_fwd_h5: "../data/ring_meshes/subject006_US120/ring_US120_fwd.h5"
+mesh_inv_h5: "../data/ring_meshes/subject006_US120/ring_US120_inv.h5"
+mappings_h5: "../data/ring_meshes/subject006_US120/ring_US120_mappings_40.h5"
+
+num_elecs: 8
+stim_current: -0.01
+stim_pattern: [0, 3]
+meas_pattern: [0, 2]
+img_size: 40
+imaging_mode: differential
+lambda_lm: 0.0
+hyper_pvi: 0.0005
+use_laplace: true
+lm_step_size: 1.0
+connectivity: node
+
+iterations: 1
+channels: [4]
+split: 0.8
+learning_rate: 0.002
+batch_size: 2
+max_epochs: 1
+patience: 1
+shared_model: false
+
+model_name: gcnm_subject006_US120_smoke
+models_dir: models/subject006_smoke
+data_dir: data/subject006_smoke

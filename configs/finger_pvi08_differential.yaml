@@ -1,0 +1,43 @@
+# GCNM-PVI: real ScioSpec / finger imaging (differential mode)
+# Use after copying raw .eit data from the other machine.
+
+pvi_solver_root: "../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver"
+
+mesh_fwd_h5: "../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver/_data/_mesh08_r64/tank2d_mdl_64_refined.h5"
+mesh_inv_h5: "../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver/_data/_mesh08_r64/tank2d_mdl_64.h5"
+mappings_h5: "../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver/_data/_mesh08_r64/tank2d_mdl_64_mappings.h5"
+
+num_elecs: 8
+stim_current: 0.001
+stim_pattern: [0, 3]
+meas_pattern: [0, 1]
+
+img_size: 32
+imaging_mode: differential
+lambda_lm: 0.1
+hyper_pvi: 0.0003
+use_laplace: true
+lm_step_size: 1.0
+connectivity: node
+
+n_samples: 500
+noise_scale: 0.005
+seed: 0
+phantom_mode: perturbation
+
+iterations: 10
+channels: [250, 250, 250]
+split: 0.8
+learning_rate: 0.002
+batch_size: 10
+max_epochs: 10000
+patience: 200
+shared_model: false
+
+model_name: gcnm_pvi08_diff
+samples_dir: samples/gcnm_pvi08_diff
+models_dir: models
+data_dir: data
+
+filter_cutoff_hz: 5.0
+filter_pass: low

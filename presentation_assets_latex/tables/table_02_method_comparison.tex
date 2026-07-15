@@ -1,0 +1,52 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{18.4cm}
+  \AssetTitle{Method comparison: original, production PVI, and our adaptation}
+
+  \vspace{0.3em}
+  \renewcommand{\arraystretch}{1.32}
+  \setlength{\tabcolsep}{5.5pt}
+  \begin{tabular}{@{}L{3.45cm}L{4.55cm}L{4.55cm}L{4.55cm}@{}}
+    \toprule
+    \rowcolor{srlNavy!8}
+    \textbf{Aspect} &
+    \textbf{Original 2D GCNM} &
+    \cellcolor{baselineGray!18}\textbf{Production PVI} &
+    \cellcolor{learnedBlue!16}\textbf{Our PVI-GCNM} \\
+    \midrule
+    Problem type & absolute $\sigma$ &
+      \cellcolor{baselineGray!7}differential $\Delta\sigma$ &
+      \cellcolor{learnedBlue!7}differential $\Delta\sigma$ \\
+    Physics per stage & recomputed &
+      \cellcolor{baselineGray!7}one fixed step &
+      \cellcolor{learnedBlue!7}\textbf{recomputed} \\
+    Jacobian & recomputed each stage &
+      \cellcolor{baselineGray!7}fixed at $\sigma_0=0.7$~S/m &
+      \cellcolor{learnedBlue!7}\textbf{recomputed each stage} \\
+    \rowcolor{learnedBlue!13}
+    \textbf{Prior filling the nullspace} & learned &
+      fixed smoothness $R$ & \textbf{learned} \\
+    \rowcolor{learnedBlue!13}
+    \textbf{Learned?} & yes & no & \textbf{yes} \\
+    Target & $\sigma^\ast$ & --- none & clean $\Delta\sigma^\ast$ \\
+    Stages & 10 & 1 & 2 \\
+    Coordinates & no & no & \textbf{yes: $x,y,r$} \\
+    \bottomrule
+  \end{tabular}
+
+  \AssetCaption{Both PVI and ours are differential---that comes from PVI.
+  Our change versus PVI is not the coordinate system; it is iterated,
+  recomputed physics plus a learned prior replacing PVI's single step and
+  fixed smoothness prior.}
+
+  \vspace{0.1em}
+  {\small\color{srlNavy}\textbf{Thesis:} physics constrains the 32 measured
+  directions; the learned prior regularizes the much larger unseen subspace.}
+
+  \vspace{0.25em}
+  {\scriptsize\color{baselineGray}Source: technical report Table 3, expanded
+  with the production-PVI column.}
+\end{minipage}
+\end{document}

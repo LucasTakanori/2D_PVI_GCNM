@@ -1,0 +1,21 @@
+{
+  "collection": "/mmfs1/projects/ece_bst/lsanc68/Peripheral-Vascular-Impedance-Imaging/data/mesh_collection_b045.mat",
+  "ring_id": "US120",
+  "img_size": 40,
+  "mapping_source": "rebuilt",
+  "inverse_nodes": 738,
+  "inverse_elements": 1330,
+  "forward_nodes": 2805,
+  "forward_elements": 5320,
+  "mesh_inv_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/subject006_US120/ring_US120_inv.h5",
+  "mesh_fwd_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/subject006_US120/ring_US120_fwd.h5",
+  "mappings_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/subject006_US120/ring_US120_mappings_40.h5",
+  "selection": {
+    "status": "confirmed_from_historical_image_mask",
+    "subject": "subject006",
+    "reference_h5": "/home/lsanc68/ece_bst_link/common/data/pvi_data/main/subject006_baseline_masked.h5",
+    "finite_pixels": 1364,
+    "mask_xor_pixels": 0,
+    "note": "US120 is the unique matching ring size; mapping uses MATLAB column-major pixel order."
+  }
+}

@@ -1,0 +1,42 @@
+\documentclass[border=8pt]{standalone}
+
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{11.6in}
+  \AssetTitle{Cross-domain visual comparison}
+
+  \vspace{0.10in}
+  \PseudoTag{\large PSEUDO-REFERENCE --- descriptive smoke-pack comparison only;
+  these images are not independent anatomical test evidence.}
+
+  \vspace{0.12in}
+  \begin{center}
+    \includegraphics[
+      width=0.83\linewidth,
+      height=9.40in,
+      keepaspectratio
+    ]{../source_images/gallery_d_cross_domain_smoke_pack.pdf}
+  \end{center}
+
+  \vspace{-0.02in}
+  \begin{center}
+    \DivergingScale{Shared PVI/Newton/GCN $\Delta\sigma$ (S/m)}{$-0.0155$}{$+0.0155$}
+    \hspace{0.35in}
+    \DivergingScale{GCN $-$ PVI (S/m)}{$-0.0099$}{$+0.0099$}
+  \end{center}
+
+  \vspace{0.06in}
+  \AssetCaption{Four cardiac phases compare the archived MATLAB PVI image,
+  the reproduced production-Newton pseudo-label, the earlier GCN output, and
+  GCN minus archived PVI. The port agrees closely with archived PVI, while the
+  GCN smooths and attenuates the image. Descriptive only: these samples belong
+  to the smoke train/validation pack.}
+
+  \vspace{0.05in}
+  \noindent{\large\textbf{Purpose.} Shows production parity and the qualitative
+  cross-domain effect of the earlier learned model without presenting the PVI
+  reconstruction as ground truth.
+  }
+\end{minipage}
+\end{document}

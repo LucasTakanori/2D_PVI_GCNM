@@ -1,0 +1,67 @@
+\documentclass[border=6pt]{standalone}
+
+% Compile from this directory so that the shared style resolves as written.
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{15.5cm}
+  \AssetTitle{Boundary information: original vs PVI ring}
+
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=14.7cm,
+      height=8.2cm,
+      ybar=0pt,
+      bar width=31pt,
+      ymode=log,
+      log basis y=10,
+      ymin=20,
+      ymax=1500,
+      axis line style={draw=srlNavy!65, line width=0.5pt},
+      tick style={draw=srlNavy!65, line width=0.5pt},
+      ymajorgrids,
+      major grid style={draw=srlNavy!13, line width=0.5pt},
+      xtick={0,1},
+      xticklabels={Original 32-electrode adjacent,PVI 8-electrode ring},
+      x tick label style={font=\small, align=center, text width=4.6cm},
+      ytick={32,100,300,928},
+      yticklabels={32,100,300,928},
+      ylabel={Boundary-voltage measurements per frame (log scale)},
+      ylabel style={font=\small},
+      tick label style={font=\small},
+      enlarge x limits=0.34,
+      % Clipping is essential on a logarithmic bar axis: the conceptual bar
+      % origin is zero, outside the logarithmic domain.
+      clip=true,
+    ]
+      \addplot[
+        fill=baselineGray,
+        draw=baselineGray!80!black,
+        line width=0.5pt,
+      ] coordinates {(0,928)};
+      \addplot[
+        fill=realCoral,
+        draw=realCoral!80!black,
+        line width=0.5pt,
+      ] coordinates {(1,32)};
+
+      \node[font=\bfseries\small, text=baselineGray!60!black, anchor=south]
+        at (axis cs:0,928) {928};
+      \node[font=\bfseries\small, text=realCoral!75!black, anchor=south]
+        at (axis cs:1,32) {32};
+
+      \draw[<->, draw=srlNavy, line width=0.8pt]
+        (axis cs:0.16,780)
+        to[bend left=11]
+        node[midway, fill=white, inner sep=3pt, font=\bfseries\small,
+             text=srlNavy, align=center]
+        {$29\times$ fewer\\measurements}
+        (axis cs:0.84,38);
+    \end{axis}
+  \end{tikzpicture}
+
+  \AssetCaption{The eight-electrode PVI ring yields 32 measurements per frame,
+  versus 928 in the original 32-electrode adjacent protocol.}
+\end{minipage}
+\end{document}

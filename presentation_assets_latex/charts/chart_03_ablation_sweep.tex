@@ -1,0 +1,116 @@
+\documentclass[border=6pt]{standalone}
+
+\input{../asset_style.tex}
+
+% One-factor stage-2 ablation sequence from report Table 10.
+\begin{document}
+\begin{minipage}{20.8cm}
+  \AssetTitle{One-factor ablations $\rightarrow$ selected $\alpha=1$, $\beta=0.25$}
+
+  \centering
+  \begin{tikzpicture}
+    \pgfplotsset{
+      ablation panel/.style={
+        width=6.55cm,
+        height=7.2cm,
+        ybar=0pt,
+        bar width=11pt,
+        bar shift=0pt,
+        ymin=0,
+        xtick={0,1,2,3,4,5,6,7,8},
+        xticklabels={Direct,+coords,$\alpha=1$,$\alpha=2$,$\alpha=4$,$\alpha=8$,$\beta=.25$,$\beta=.5$,$\beta=1$},
+        x tick label style={font=\tiny, rotate=43, anchor=east},
+        tick label style={font=\scriptsize},
+        title style={font=\bfseries\small, text=srlNavy},
+        axis line style={draw=srlNavy!60, line width=0.5pt},
+        tick style={draw=srlNavy!60, line width=0.5pt},
+        ymajorgrids,
+        major grid style={draw=srlNavy!12, line width=0.5pt},
+        enlarge x limits=0.07,
+        clip=false,
+        every node near coord/.append style={font=\fontsize{4.8}{5.2}\selectfont,
+          rotate=90, anchor=west, text=srlNavy},
+      },
+      architecture bars/.style={fill=learnedBlue, draw=learnedBlue!80!black, line width=0.5pt},
+      weight bars/.style={fill=oracleAmber, draw=oracleAmber!80!black, line width=0.5pt},
+      background bars/.style={fill=backgroundGreen, draw=backgroundGreen!80!black, line width=0.5pt},
+      selected bar/.style={
+        fill=backgroundGreen,
+        draw=srlNavy,
+        line width=0.9pt,
+        postaction={pattern=north east lines, pattern color=srlNavy},
+      },
+    }
+
+    \begin{axis}[
+      ablation panel,
+      at={(0cm,0cm)}, anchor=south west,
+      title={Image correlation $\uparrow$},
+      ymax=0.64,
+      ytick={0,0.2,0.4,0.6},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=3]{\pgfplotspointmeta}},
+    ]
+      \addplot+[architecture bars] coordinates {(0,0.458) (1,0.561)};
+      \addplot+[weight bars] coordinates {(2,0.557) (3,0.524) (4,0.489) (5,0.479)};
+      \addplot+[selected bar] coordinates {(6,0.557)};
+      \addplot+[background bars] coordinates {(7,0.530) (8,0.527)};
+      \node[font=\large, text=srlNavy, anchor=south] at (axis cs:6,0.598) {$\star$};
+    \end{axis}
+
+    \begin{axis}[
+      ablation panel,
+      at={(6.95cm,0cm)}, anchor=south west,
+      title={Dice $\uparrow$},
+      ymax=0.62,
+      ytick={0,0.2,0.4,0.6},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=3]{\pgfplotspointmeta}},
+    ]
+      \addplot+[architecture bars] coordinates {(0,0.230) (1,0.471)};
+      \addplot+[weight bars] coordinates {(2,0.543) (3,0.457) (4,0.407) (5,0.394)};
+      \addplot+[selected bar] coordinates {(6,0.485)};
+      \addplot+[background bars] coordinates {(7,0.462) (8,0.427)};
+      \node[font=\large, text=srlNavy, anchor=south] at (axis cs:6,0.535) {$\star$};
+    \end{axis}
+
+    \begin{axis}[
+      ablation panel,
+      at={(13.90cm,0cm)}, anchor=south west,
+      title={Background RMS $\downarrow$},
+      ymax=0.00315,
+      ytick={0,0.001,0.002,0.003},
+      yticklabel style={/pgf/number format/fixed,/pgf/number format/precision=3},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=5]{\pgfplotspointmeta}},
+    ]
+      \addplot+[architecture bars] coordinates {(0,0.000581) (1,0.000865)};
+      \addplot+[weight bars] coordinates {(2,0.001541) (3,0.001778) (4,0.002232) (5,0.002730)};
+      \addplot+[selected bar] coordinates {(6,0.001276)};
+      \addplot+[background bars] coordinates {(7,0.000992) (8,0.000845)};
+      \node[font=\large, text=srlNavy, anchor=south] at (axis cs:6,0.00157) {$\star$};
+    \end{axis}
+
+    \coordinate (legendCenter) at (10.15cm,-1.34cm);
+    \filldraw[draw=learnedBlue!80!black,fill=learnedBlue,line width=0.5pt]
+      ($(legendCenter)+(-7.15cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(-6.78cm,0)$)
+      {architecture/features};
+    \filldraw[draw=oracleAmber!80!black,fill=oracleAmber,line width=0.5pt]
+      ($(legendCenter)+(-3.05cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(-2.68cm,0)$)
+      {vessel weight $\alpha$};
+    \filldraw[draw=backgroundGreen!80!black,fill=backgroundGreen,line width=0.5pt]
+      ($(legendCenter)+(0.72cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(1.09cm,0)$)
+      {background penalty $\beta$};
+    \filldraw[
+      draw=srlNavy, fill=backgroundGreen, line width=0.5pt,
+      postaction={pattern=north east lines,pattern color=srlNavy}
+    ] ($(legendCenter)+(5.15cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(5.52cm,0)$)
+      {selected};
+  \end{tikzpicture}
+
+  \AssetCaption{Coordinates give the largest isolated gain.  Vessel weighting
+  $\alpha=1$ improves localization but raises background energy; $\beta=0.25$
+  is the selected balanced operating point, not the maximum of one metric.}
+\end{minipage}
+\end{document}

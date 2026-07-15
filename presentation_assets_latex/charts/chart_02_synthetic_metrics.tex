@@ -1,0 +1,111 @@
+\documentclass[border=6pt]{standalone}
+
+\input{../asset_style.tex}
+
+% Exact nonlinear holdout, n=32.  Values come from report Tables 8 and 10.
+\begin{document}
+\begin{minipage}{18.2cm}
+  \AssetTitle{Exact-nonlinear holdout: baseline, physics-only, learned}
+
+  \centering
+  \begin{tikzpicture}
+    \pgfplotsset{
+      metric panel/.style={
+        width=8.25cm,
+        height=5.35cm,
+        ybar=0pt,
+        bar width=15pt,
+        ymin=0,
+        xtick={0,1,2},
+        xticklabels={Newton,Iterative LM,Selected GCNM},
+        x tick label style={font=\scriptsize, align=center},
+        tick label style={font=\scriptsize},
+        title style={font=\bfseries\small, text=srlNavy},
+        axis line style={draw=srlNavy!60, line width=0.5pt},
+        tick style={draw=srlNavy!60, line width=0.5pt},
+        ymajorgrids,
+        major grid style={draw=srlNavy!12, line width=0.5pt},
+        enlarge x limits=0.19,
+        clip=false,
+        every node near coord/.append style={font=\scriptsize, anchor=south,
+          text=srlNavy},
+      },
+      baseline bar/.style={fill=baselineGray, draw=baselineGray!80!black, line width=0.5pt},
+      physics bar/.style={fill=physicsTeal, draw=physicsTeal!80!black, line width=0.5pt},
+      learned bar/.style={fill=learnedBlue, draw=srlNavy, line width=0.8pt},
+    }
+
+    \begin{axis}[
+      metric panel,
+      at={(0cm,6.05cm)}, anchor=south west,
+      title={Image correlation $\uparrow$},
+      ymax=0.64,
+      ytick={0,0.2,0.4,0.6},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=3]{\pgfplotspointmeta}},
+    ]
+      \addplot+[baseline bar] coordinates {(0,0.265365)};
+      \addplot+[physics bar] coordinates {(1,0.290846)};
+      \addplot+[learned bar] coordinates {(2,0.557410)};
+    \end{axis}
+
+    \begin{axis}[
+      metric panel,
+      at={(9.15cm,6.05cm)}, anchor=south west,
+      title={Dice $\uparrow$},
+      ymax=0.57,
+      ytick={0,0.2,0.4},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=3]{\pgfplotspointmeta}},
+    ]
+      \addplot+[baseline bar] coordinates {(0,0.294649)};
+      \addplot+[physics bar] coordinates {(1,0.393929)};
+      \addplot+[learned bar] coordinates {(2,0.485336)};
+    \end{axis}
+
+    \begin{axis}[
+      metric panel,
+      at={(0cm,0cm)}, anchor=south west,
+      title={Image RMSE $\downarrow$},
+      ymax=0.00585,
+      ytick={0,0.002,0.004},
+      yticklabel style={/pgf/number format/fixed,/pgf/number format/precision=3},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=5]{\pgfplotspointmeta}},
+    ]
+      \addplot+[baseline bar] coordinates {(0,0.00505839)};
+      \addplot+[physics bar] coordinates {(1,0.00503314)};
+      \addplot+[learned bar] coordinates {(2,0.00432389)};
+    \end{axis}
+
+    \begin{axis}[
+      metric panel,
+      at={(9.15cm,0cm)}, anchor=south west,
+      title={Background RMS $\downarrow$},
+      ymax=0.00148,
+      ytick={0,0.0005,0.0010},
+      yticklabel style={/pgf/number format/fixed,/pgf/number format/precision=4},
+      nodes near coords={\pgfmathprintnumber[fixed,precision=5]{\pgfplotspointmeta}},
+    ]
+      \addplot+[baseline bar] coordinates {(0,0.000626215)};
+      \addplot+[physics bar] coordinates {(1,0.000588751)};
+      \addplot+[learned bar] coordinates {(2,0.001275639)};
+    \end{axis}
+
+    \coordinate (legendCenter) at (8.70cm,-0.95cm);
+    \filldraw[draw=baselineGray!80!black,fill=baselineGray,line width=0.5pt]
+      ($(legendCenter)+(-5.15cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(-4.78cm,0)$)
+      {Newton baseline};
+    \filldraw[draw=physicsTeal!80!black,fill=physicsTeal,line width=0.5pt]
+      ($(legendCenter)+(-1.55cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(-1.18cm,0)$)
+      {iterative LM (physics only)};
+    \filldraw[draw=srlNavy,fill=learnedBlue,line width=0.5pt]
+      ($(legendCenter)+(2.65cm,-0.10cm)$) rectangle ++(0.28cm,0.20cm);
+    \node[anchor=west,font=\scriptsize] at ($(legendCenter)+(3.02cm,0)$)
+      {selected GCNM};
+  \end{tikzpicture}
+
+  \AssetCaption{A Pareto trade-off: the learned model wins spatial structure
+  (correlation and Dice) while paying some background energy.  All metrics use
+  known synthetic ground truth $\Delta\sigma^*$.}
+\end{minipage}
+\end{document}

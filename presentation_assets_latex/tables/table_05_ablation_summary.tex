@@ -1,0 +1,59 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{18.3cm}
+  \AssetTitle{Ablation summary: selecting a balanced PVI-GCNM}
+
+  \vspace{0.25em}
+  {\small\color{srlNavy}Deployable homogeneous-baseline models; stage 2 on
+  the same 32 exact-nonlinear holdout phantoms. One factor changes at a time.}
+
+  \vspace{0.45em}
+  \renewcommand{\arraystretch}{1.25}
+  \setlength{\tabcolsep}{6.5pt}
+  \begin{tabular}{@{}L{6.3cm}C{2.55cm}C{2.15cm}C{2.45cm}C{2.55cm}@{}}
+    \toprule
+    \rowcolor{srlNavy!8}
+    \textbf{Experiment} &
+    \textbf{Global corr. $\uparrow$} &
+    \textbf{Dice $\uparrow$} &
+    \textbf{RMSE $\downarrow$} &
+    \textbf{BG RMS $\downarrow$} \\
+    \midrule
+    \rowcolor{learnedBlue!6}
+    Direct core & 0.458 & 0.230 & 0.00484 & \textbf{0.000581} \\
+    \rowcolor{learnedBlue!10}
+    Direct $+$ coordinates & \textbf{0.561} & 0.471 & 0.00444 & 0.000865 \\
+    \midrule
+    $\alpha=1$ & 0.557 & \textbf{0.543} & \textbf{0.00430} & 0.001541 \\
+    $\alpha=2$ & 0.524 & 0.457 & 0.00445 & 0.001778 \\
+    $\alpha=4$ & 0.489 & 0.407 & 0.00477 & 0.002232 \\
+    $\alpha=8$ & 0.479 & 0.394 & 0.00519 & 0.002730 \\
+    \midrule
+    \rowcolor{backgroundGreen!16}
+    \textbf{$\alpha=1,\beta=0.25$ \enspace$\star$ selected} &
+      0.557 & 0.485 & 0.00432 & 0.001276 \\
+    \rowcolor{backgroundGreen!7}
+    $\alpha=1,\beta=0.5$ & 0.530 & 0.462 & 0.00446 & 0.000992 \\
+    \rowcolor{backgroundGreen!7}
+    $\alpha=1,\beta=1.0$ & 0.527 & 0.427 & 0.00453 & 0.000845 \\
+    \bottomrule
+  \end{tabular}
+
+  \AssetCaption{Coordinates give the largest single gain
+  (0.458$\rightarrow$0.561). $\alpha=1$ best balances Dice and reconstruction
+  error; $\beta=0.25$ trims background at little correlation cost. The model
+  was selected by a composite RMSE/background/Dice score, not by maximizing
+  one column.}
+
+  \vspace{0.05em}
+  {\footnotesize\color{baselineGray}Bold = best value in each metric column;
+  $\star$ = selected operating point. The selected row need not win every
+  individual metric.}
+
+  \vspace{0.25em}
+  {\scriptsize\color{baselineGray}Source: technical report Table 10; selected
+  checkpoint faithful\_background025\_hom\_seed0.}
+\end{minipage}
+\end{document}

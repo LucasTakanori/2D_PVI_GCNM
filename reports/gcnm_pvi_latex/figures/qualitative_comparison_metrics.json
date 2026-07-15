@@ -1,0 +1,7 @@
+{
+  "samples": 10,
+  "archived_pvi_vs_production_pseudo_image_correlation": 0.9928508585247298,
+  "archived_pvi_vs_previous_gcn_image_correlation": 0.9628039880718525,
+  "production_pseudo_vs_previous_gcn_image_correlation": 0.97146958240543,
+  "scope": "Ten train/validation smoke examples; descriptive only, not independent test performance or anatomical validation."
+}

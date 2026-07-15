@@ -1,0 +1,20 @@
+\documentclass[border=6pt]{standalone}
+
+\input{../asset_style.tex}
+
+% The archived report figure already contains the underlying per-epoch curves.
+% This wrapper keeps it available as a presentation appendix asset without
+% inventing points from a raster/PDF trace.
+\begin{document}
+\begin{minipage}{18.0cm}
+  \AssetTitle{Training and validation objective by GCNM stage}
+
+  \centering
+  \includegraphics[width=17.6cm]{../source_images/training_curves.pdf}
+
+  \AssetCaption{Greedy stage-wise training.  Stage 1 reaches its best validation
+  objective near epoch 55; stage 2 continues to approximately epoch 143.  This
+  appendix asset wraps the archived report curve rather than digitizing it.}
+\end{minipage}
+\end{document}
+

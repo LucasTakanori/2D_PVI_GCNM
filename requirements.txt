@@ -1,0 +1,11 @@
+# GCNM-PVI Python dependencies
+# numpy must stay <2 unless pvi_forward.py is patched (uses np.math.factorial)
+
+numpy<2
+scipy
+h5py
+pyyaml
+shapely
+matplotlib
+torch
+torch_geometric

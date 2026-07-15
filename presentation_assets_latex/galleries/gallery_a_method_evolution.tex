@@ -1,0 +1,31 @@
+\documentclass[border=8pt]{standalone}
+
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{14in}
+  \AssetTitle{Method evolution on one shared synthetic phantom}
+
+  \vspace{0.10in}
+  \SyntheticTag{\large Synthetic evaluation --- known ground truth
+  $\Delta\sigma^{*}$}
+
+  \vspace{0.12in}
+  \noindent\includegraphics[
+    width=\linewidth,
+    height=5.95in,
+    keepaspectratio
+  ]{../source_images/gallery_a_method_evolution.pdf}
+
+  \vspace{0.10in}
+  \AssetCaption{Same phantom and same Newton input. The earlier learned stages
+  recover the broad vessel-bearing region, but not the two compact vessels;
+  stage 2 adds a false central negative. The error maps show prediction minus
+  known clean truth on the registered inverse mesh.}
+
+  \vspace{0.05in}
+  \noindent{\large\textbf{Purpose.} Documents the limitation of the earlier
+  fixed-feature method before recomputed nonlinear physics was introduced.
+  }
+\end{minipage}
+\end{document}

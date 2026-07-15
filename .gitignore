@@ -1,0 +1,69 @@
+# Private/generated scientific artifacts
+data/*
+!data/ring_meshes/
+!data/ring_meshes/**
+logs/
+models/
+env/
+samples/
+outputs/
+results/
+artifacts/
+checkpoints/
+runs/
+wandb/
+lightning_logs/
+
+# Python environments and caches
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+.env*
+!.env.example
+
+# Model, array, mesh, and acquisition files
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.mat
+*.eit
+*.csv
+*.parquet
+*.pkl
+*.pickle
+*.joblib
+*.onnx
+*.safetensors
+!data/ring_meshes/**/*.h5
+
+# Scheduler and runtime logs
+*.out
+*.err
+*.log
+
+# LaTeX build intermediates; keep source, figures, and final PDF
+reports/**/main.aux
+reports/**/main.toc
+reports/**/main.out
+reports/**/*.fls
+reports/**/*.fdb_latexmk
+reports/**/*.synctex.gz
+reports/**/*.xdv
+
+# Local archives and extracted prototypes
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+gcnm_pvi_extracted/

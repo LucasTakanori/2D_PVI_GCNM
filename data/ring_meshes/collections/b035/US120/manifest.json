@@ -1,0 +1,13 @@
+{
+  "collection": "/mmfs1/projects/ece_bst/lsanc68/Peripheral-Vascular-Impedance-Imaging/data/mesh_collection_b035.mat",
+  "ring_id": "US120",
+  "img_size": 40,
+  "mapping_source": "collection",
+  "inverse_nodes": 1020,
+  "inverse_elements": 1862,
+  "forward_nodes": 3901,
+  "forward_elements": 7448,
+  "mesh_inv_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/collections/b035/US120/ring_US120_inv.h5",
+  "mesh_fwd_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/collections/b035/US120/ring_US120_fwd.h5",
+  "mappings_h5": "/mmfs1/projects/ece_bst/lsanc68/2D_GCNM/data/ring_meshes/collections/b035/US120/ring_US120_mappings_40.h5"
+}

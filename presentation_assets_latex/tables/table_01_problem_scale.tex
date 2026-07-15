@@ -1,0 +1,38 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{15.6cm}
+  \AssetTitle{Problem scale: original 2D GCNM vs subject-6 PVI}
+
+  \vspace{0.35em}
+  \renewcommand{\arraystretch}{1.38}
+  \setlength{\tabcolsep}{7pt}
+  \begin{tabular}{@{}L{6.2cm}C{4.1cm}C{4.1cm}@{}}
+    \toprule
+    \rowcolor{srlNavy!8}
+    \textbf{Quantity} &
+    \textbf{Original (Injun)} &
+    \cellcolor{realCoral!13}\textbf{Subject-6 PVI} \\
+    \midrule
+    Physical electrodes & 32 & \cellcolor{realCoral!7}8 \\
+    Measurements per frame & 928 & \cellcolor{realCoral!7}\textbf{32} \\
+    Inverse elements, $K$ & --- & \cellcolor{realCoral!7}1,330 \\
+    Forward elements & --- & \cellcolor{realCoral!7}5,320 \\
+    Measurement-to-unknown ratio & high &
+      \cellcolor{realCoral!7}$32/1330\approx\mathbf{0.024}$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.5em}
+  {\small\color{realCoral}\textbf{29$\times$ fewer boundary
+  measurements} for a larger unknown field.}
+
+  \AssetCaption{The PVI ring supplies 29$\times$ fewer measurements for a
+  larger unknown field. This information deficit is fundamental---no amount
+  of network capacity removes it.}
+
+  {\scriptsize\color{baselineGray}Source: technical report Tables 1--2 and
+  Figure 1.}
+\end{minipage}
+\end{document}

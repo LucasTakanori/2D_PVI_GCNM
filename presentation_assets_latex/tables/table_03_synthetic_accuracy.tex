@@ -1,0 +1,55 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{18.2cm}
+  \AssetTitle{Synthetic accuracy: exact-nonlinear holdout}
+
+  \vspace{0.2em}
+  {\small\color{srlNavy}\textbf{Task.} Recover differential vascular
+  conductivity $\Delta\sigma$ from 32 boundary voltages. Metrics compare
+  against known ground truth $\Delta\sigma^\ast$: 32 exact-nonlinear
+  holdout phantoms, never seen in training.}
+
+  \vspace{0.55em}
+  \renewcommand{\arraystretch}{1.48}
+  \setlength{\tabcolsep}{7pt}
+  \begin{tabular}{@{}L{6.25cm}C{2.55cm}C{2.25cm}C{2.6cm}C{2.55cm}@{}}
+    \toprule
+    \rowcolor{srlNavy!8}
+    \textbf{Method} &
+    \textbf{Image corr. $\uparrow$} &
+    \textbf{Dice $\uparrow$} &
+    \textbf{Image RMSE $\downarrow$} &
+    \textbf{BG RMS $\downarrow$} \\
+    \midrule
+    \rowcolor{baselineGray!11}
+    \textcolor{baselineGray}{\rule{0.9em}{0.9em}}\enspace
+      Newton, one step (PVI-style) & 0.265 & 0.295 & 0.00506 & 0.00063 \\
+    \rowcolor{physicsTeal!11}
+    \textcolor{physicsTeal}{\rule{0.9em}{0.9em}}\enspace
+      Iterative LM, 2 steps (no GCN) & 0.291 & 0.394 & 0.00503 &
+      \textbf{0.00059} \\
+    \rowcolor{learnedBlue!14}
+    \textcolor{learnedBlue}{\rule{0.9em}{0.9em}}\enspace
+      \textbf{Selected GCNM ($\alpha=1,\beta=0.25$)} &
+      \textbf{0.557} & \textbf{0.485} & \textbf{0.00432} & 0.00128 \\
+    \bottomrule
+  \end{tabular}
+
+  \AssetCaption{Iterating the physics alone barely moves correlation
+  (0.265$\rightarrow$0.291). The jump to 0.557 is what the \textbf{learned}
+  prior adds. The selected model localizes vessels far better (Dice 0.485)
+  at a modest cost in background cleanliness.}
+
+  \vspace{0.1em}
+  {\footnotesize\color{baselineGray}
+  \textbf{Metric key:} corr. = spatial pattern match versus truth;
+  Dice = vessel-location overlap (0--1); BG RMS = false signal in
+  non-vessel regions. Bold = best value in each metric column.}
+
+  \vspace{0.25em}
+  {\scriptsize\color{baselineGray}Source: technical report Tables 8 and 10;
+  common 32-phantom exact-nonlinear holdout.}
+\end{minipage}
+\end{document}

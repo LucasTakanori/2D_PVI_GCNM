@@ -1,0 +1,53 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{18.2cm}
+  \AssetTitle{Real subject-6 transfer: agreement is not accuracy}
+  \PseudoTag{PVI pseudo-reference --- not ground truth}
+
+  \vspace{0.3em}
+  {\small\color{realCoral}\textbf{Task.} Real subject-6 voltages, held-out
+  trials 10--11. There is \textbf{no anatomical ground truth} on a real
+  limb. \mbox{Correlation} is versus the PVI Newton pseudo-reference: it measures
+  agreement with the existing inverse, not anatomical correctness.}
+
+  \vspace{0.55em}
+  \renewcommand{\arraystretch}{1.52}
+  \setlength{\tabcolsep}{7pt}
+  \arrayrulecolor{realCoral!45}
+  \begin{tabular}{@{}L{6.4cm}C{2.9cm}C{4.0cm}C{2.8cm}@{}}
+    \toprule
+    \rowcolor{realCoral!14}
+    \textbf{Method} &
+    \textbf{Corr. vs PVI $\uparrow$} &
+    \textbf{Mean per-sample corr. $\uparrow$} &
+    \textbf{Voltage RMS $\downarrow$} \\
+    \midrule
+    \rowcolor{baselineGray!10}
+    Iterative LM stage 1\newline
+      {\footnotesize\color{baselineGray}matches PVI by construction} &
+      \textbf{1.000} & \textbf{1.000} & \textbf{6.66e-6} \\
+    \rowcolor{realCoral!8}
+    Selected GCNM stage 1 & 0.604 & 0.443 & 1.68e-5 \\
+    \rowcolor{realCoral!13}
+    Selected GCNM stage 2 & 0.169 & 0.275 & 2.63e-5 \\
+    \bottomrule
+  \end{tabular}
+  \arrayrulecolor{black}
+
+  \AssetCaption{Stage 1 sits near the PVI inverse and lowers its physical
+  voltage residual; stage 2 drifts away and raises it. This is direct
+  evidence of synthetic-to-real distribution shift---not a verdict on which
+  image is more anatomically correct.}
+
+  \vspace{0.1em}
+  {\footnotesize\color{realCoral}
+  $\uparrow$ means greater agreement with the pseudo-reference, not greater
+  anatomical accuracy. Bold = best value in each displayed column.}
+
+  \vspace{0.25em}
+  {\scriptsize\color{baselineGray}Source: technical report Table 13; all
+  1,600 held-out phases from subject-6 trials 10--11.}
+\end{minipage}
+\end{document}

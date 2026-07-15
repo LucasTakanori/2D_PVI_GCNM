@@ -1,0 +1,43 @@
+\documentclass[border=8pt]{standalone}
+
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{14in}
+  \AssetTitle{Selected GCNM: best, median, and worst synthetic cases}
+
+  \vspace{0.10in}
+  \SyntheticTag{\large Synthetic evaluation --- known ground truth
+  $\Delta\sigma^{*}$; rows are selected objectively by final-stage image
+  correlation}
+
+  \vspace{0.12in}
+  \noindent\includegraphics[
+    width=\linewidth,
+    height=7.35in,
+    keepaspectratio
+  ]{../source_images/gallery_b_selected_best_median_worst.pdf}
+
+  \vspace{0.04in}
+  \begin{center}
+    \DivergingScale{Best row $\Delta\sigma$ (S/m)}{$-0.00827$}{$+0.00827$}
+    \hspace{0.22in}
+    \DivergingScale{Median row $\Delta\sigma$ (S/m)}{$-0.01311$}{$+0.01311$}
+    \hspace{0.22in}
+    \DivergingScale{Worst row $\Delta\sigma$ (S/m)}{$-0.00681$}{$+0.00681$}
+  \end{center}
+
+  \vspace{0.10in}
+  \AssetCaption{Objectively selected best, median, and worst cases for the
+  faithful $\alpha=1$, $\beta=0.25$ model. The faithful stages concentrate
+  energy nearer the true vessel region, but still predict a smooth learned
+  distribution rather than resolving every compact vessel---an honest limit
+  with only 32 measurements.}
+
+  \vspace{0.05in}
+  \noindent{\large\textbf{Purpose.} Directly compares clean truth, the saved Newton
+  step, the two-step physics-only control, the earlier fixed-feature GCN, and
+  the recomputed-physics GCNM across easy, typical, and difficult cases.
+  }
+\end{minipage}
+\end{document}

@@ -1,0 +1,34 @@
+\documentclass[border=6pt]{standalone}
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{13.8cm}
+  \AssetTitle{Production parity: validating the reconstruction port}
+
+  \vspace{0.25em}
+  {\small\color{baselineGray}Frame-matched subject-6 reconstruction:
+  Python port versus the archived MATLAB PVI output.}
+
+  \vspace{0.5em}
+  \renewcommand{\arraystretch}{1.45}
+  \setlength{\tabcolsep}{8pt}
+  \begin{tabular}{@{}L{8.7cm}C{3.8cm}@{}}
+    \toprule
+    \rowcolor{baselineGray!16}
+    \textbf{Metric} & \textbf{Value} \\
+    \midrule
+    Frames & 500 \\
+    Global image correlation $\uparrow$ & \textbf{0.9936} \\
+    Finite-mask IoU $\uparrow$ & \textbf{1.000} \\
+    Image RMSE $\downarrow$ & \textbf{6.86e-4} \\
+    \bottomrule
+  \end{tabular}
+
+  \AssetCaption{Our Python port reproduces the archived MATLAB PVI
+  reconstruction. This validates the pipeline---it says nothing about
+  learned image quality or anatomical correctness.}
+
+  {\scriptsize\color{baselineGray}Source: technical report Table 4; 500
+  frame-matched subject-6 reconstructions.}
+\end{minipage}
+\end{document}

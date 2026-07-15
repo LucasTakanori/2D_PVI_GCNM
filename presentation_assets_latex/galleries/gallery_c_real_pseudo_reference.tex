@@ -1,0 +1,53 @@
+\documentclass[border=8pt]{standalone}
+
+\input{../asset_style.tex}
+
+\begin{document}
+\begin{minipage}{14in}
+  \AssetTitle{Real subject-6 staged reconstructions}
+
+  \vspace{0.10in}
+  \PseudoTag{\large PSEUDO-REFERENCE --- the PVI Newton image is not anatomical
+  ground truth. No Dice or vessel-truth claim transfers to this figure.}
+
+  \vspace{0.12in}
+  \noindent\includegraphics[
+    width=\linewidth,
+    height=8.60in,
+    keepaspectratio
+  ]{../source_images/gallery_c_real_subject6_pseudo_reference.pdf}
+
+  \vspace{0.04in}
+  \begin{center}
+    \DivergingScale{Symmetric per-row $\Delta\sigma$ scale}{$-L_r$}{$+L_r$}
+  \end{center}
+  \vspace{-0.02in}
+  \begin{center}
+  {\small\color{srlNavy}
+  \begin{tabular}{@{}c@{\quad}c@{\quad}c@{\qquad}c@{\quad}c@{\quad}c@{\qquad}c@{\quad}c@{\quad}c@{\qquad}c@{\quad}c@{\quad}c@{}}
+    \textbf{Sample} & \textbf{main $L_r$} & \textbf{difference $L_r$} &
+    \textbf{Sample} & \textbf{main $L_r$} & \textbf{difference $L_r$} &
+    \textbf{Sample} & \textbf{main $L_r$} & \textbf{difference $L_r$} &
+    \textbf{Sample} & \textbf{main $L_r$} & \textbf{difference $L_r$} \\
+    0 & 0.01014 & 0.01011 & 3 & 0.03780 & 0.04327 &
+    6 & 0.02764 & 0.03773 & 9 & 0.01284 & 0.01171
+  \end{tabular}}
+  \end{center}
+  {\footnotesize\color{realCoral}Main scale is shared by pseudo-reference,
+  LM, and GCNM panels in a row; the final difference panel uses the listed
+  difference scale. Values are in S/m.}
+
+  \vspace{0.10in}
+  \AssetCaption{Four deterministic held-out subject-6 phases compare the PVI
+  Newton pseudo-reference, two iterative-LM stages, two faithful GCNM stages,
+  and the final difference from the pseudo-reference. Stage 2 drifts visibly
+  on real data; this is evidence of synthetic-to-real distribution shift, not
+  evidence that either reconstruction is anatomically correct.}
+
+  \vspace{0.05in}
+  \noindent{\large\textbf{Purpose.} Makes the real-domain stage-2 drift visible and
+  pairs with the voltage-residual analysis used to motivate physics-aware
+  early stopping.
+  }
+\end{minipage}
+\end{document}

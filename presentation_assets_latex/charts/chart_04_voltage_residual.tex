@@ -1,0 +1,96 @@
+\documentclass[border=6pt]{standalone}
+
+\input{../asset_style.tex}
+
+% Selected alpha=1, beta=0.25 model.  Synthetic values are exact-nonlinear
+% holdout residuals; real values are subject-6 held-out trials 10--11.
+\begin{document}
+\begin{minipage}{17.7cm}
+  \AssetTitle{Voltage residual: synthetic holds, real drifts at stage 2}
+  \PseudoTag{Real-data line: pseudo-reference context; not anatomical truth}
+
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=16.7cm,
+      height=8.3cm,
+      xmin=-0.18,
+      xmax=2.18,
+      ymin=0,
+      ymax=3.05e-5,
+      xtick={0,1,2},
+      xticklabels={Input residual,After GCNM stage 1,After GCNM stage 2},
+      x tick label style={font=\small, align=center},
+      ytick={0,0.5e-5,1.0e-5,1.5e-5,2.0e-5,2.5e-5,3.0e-5},
+      yticklabels={0,5e-6,1.0e-5,1.5e-5,2.0e-5,2.5e-5,3.0e-5},
+      scaled y ticks=false,
+      ylabel={Voltage residual RMS $\downarrow$},
+      ylabel style={font=\small},
+      tick label style={font=\small},
+      axis line style={draw=srlNavy!65, line width=0.5pt},
+      tick style={draw=srlNavy!65, line width=0.5pt},
+      ymajorgrids,
+      major grid style={draw=srlNavy!13, line width=0.5pt},
+      legend style={
+        draw=none,
+        fill=white,
+        font=\small,
+        at={(0.02,0.98)},
+        anchor=north west,
+      },
+      clip=false,
+    ]
+      \addplot[
+        color=learnedBlue,
+        line width=1.6pt,
+        mark=*,
+        mark size=3.2pt,
+        mark options={fill=learnedBlue,draw=learnedBlue},
+      ] coordinates {
+        (0,3.165616839e-6)
+        (1,2.411824571e-6)
+        (2,3.184822570e-6)
+      };
+      \addlegendentry{Synthetic exact-nonlinear holdout}
+
+      \addplot[
+        color=realCoral,
+        line width=1.6pt,
+        mark=square*,
+        mark size=3.2pt,
+        mark options={fill=realCoral,draw=realCoral},
+      ] coordinates {
+        (0,2.355160483e-5)
+        (1,1.676519558e-5)
+        (2,2.628801954e-5)
+      };
+      \addlegendentry{Real subject 6}
+
+      \node[font=\scriptsize, text=learnedBlue, anchor=south west]
+        at (axis cs:0,3.165616839e-6) {3.17e-6};
+      \node[font=\scriptsize, text=learnedBlue, anchor=north]
+        at (axis cs:1,2.411824571e-6) {2.41e-6};
+      \node[font=\scriptsize, text=learnedBlue, anchor=south east]
+        at (axis cs:2,3.184822570e-6) {3.18e-6};
+
+      \node[font=\scriptsize, text=realCoral!80!black, anchor=south west]
+        at (axis cs:0,2.355160483e-5) {2.36e-5};
+      \node[font=\scriptsize, text=realCoral!80!black, anchor=north]
+        at (axis cs:1,1.676519558e-5) {1.68e-5};
+      \node[font=\scriptsize, text=realCoral!80!black, anchor=south east]
+        at (axis cs:2,2.628801954e-5) {2.63e-5};
+
+      \draw[-{Latex[length=2.2mm]}, draw=realCoral, line width=0.8pt]
+        (axis cs:1.63,2.05e-5)
+        -- node[fill=white, inner sep=2pt, font=\bfseries\scriptsize,
+                text=realCoral!80!black, anchor=south east]
+                {stage-2 real drift}
+        (axis cs:1.93,2.56e-5);
+    \end{axis}
+  \end{tikzpicture}
+
+  \AssetCaption{The selected model remains at low residual in-distribution.
+  For real PVI, stage 1 reduces the mismatch but stage 2 reverses the gain---the
+  clearest evidence for synthetic-to-real shift and physics-aware early stopping.}
+\end{minipage}
+\end{document}
