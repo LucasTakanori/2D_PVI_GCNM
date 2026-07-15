@@ -74,8 +74,18 @@ def _sample_ellipse_center(
     return radial * np.cos(angle), radial * np.sin(angle)
 
 
-def sample_anatomy(rng: np.random.Generator) -> AnatomyParameters:
-    """Draw one arm cross-section with a bone and one or two vessels."""
+def sample_anatomy(
+    rng: np.random.Generator,
+    *,
+    vessel_count: int | None = None,
+) -> AnatomyParameters:
+    """Draw one arm cross-section with a bone and one or two vessels.
+
+    ``vessel_count=None`` preserves the original mixed distribution.  Passing
+    one or two makes the count explicit for controlled training experiments.
+    """
+    if vessel_count not in {None, 1, 2}:
+        raise ValueError("vessel_count must be None, 1, or 2")
     rotation = float(rng.uniform(-np.pi, np.pi))
     skin_thickness = float(rng.uniform(0.035, 0.075))
     fat_thickness = float(rng.uniform(0.08, 0.20))
@@ -91,7 +101,7 @@ def sample_anatomy(rng: np.random.Generator) -> AnatomyParameters:
 
     vessels: list[Ellipse] = []
     vessel_delta: list[float] = []
-    count = int(rng.integers(1, 3))
+    count = int(rng.integers(1, 3)) if vessel_count is None else vessel_count
     for _ in range(count):
         for _attempt in range(200):
             x, y = _sample_ellipse_center(rng, radial_limit=0.55)

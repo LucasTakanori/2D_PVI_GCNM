@@ -36,6 +36,9 @@ OUTPUT_MODE="${OUTPUT_MODE:-direct}"
 USE_COORDINATES="${USE_COORDINATES:-0}"
 POSITIVE_WEIGHT="${POSITIVE_WEIGHT:-0}"
 BACKGROUND_WEIGHT="${BACKGROUND_WEIGHT:-0}"
+DICE_WEIGHT="${DICE_WEIGHT:-0}"
+HARD_BACKGROUND_WEIGHT="${HARD_BACKGROUND_WEIGHT:-0}"
+HARD_BACKGROUND_FRACTION="${HARD_BACKGROUND_FRACTION:-0.05}"
 CHECKPOINT_MODE="${CHECKPOINT_MODE:-loss}"
 MAX_TRAIN="${MAX_TRAIN:-}"
 MAX_VALIDATION="${MAX_VALIDATION:-}"
@@ -58,6 +61,9 @@ ARGS=(
   --output-mode "${OUTPUT_MODE}"
   --positive-weight "${POSITIVE_WEIGHT}"
   --background-weight "${BACKGROUND_WEIGHT}"
+  --dice-weight "${DICE_WEIGHT}"
+  --hard-background-weight "${HARD_BACKGROUND_WEIGHT}"
+  --hard-background-fraction "${HARD_BACKGROUND_FRACTION}"
   --checkpoint-mode "${CHECKPOINT_MODE}"
   --seed "${SEED}"
   --baseline-mode "${BASELINE_MODE}"
@@ -71,7 +77,7 @@ if [[ -n "${ITERATIONS}" ]]; then ARGS+=(--iterations "${ITERATIONS}"); fi
 if [[ "${ALLOW_OVERWRITE}" == "1" ]]; then ARGS+=(--allow-overwrite); fi
 
 echo "job=${SLURM_JOB_ID} host=$(hostname) experiment=${EXPERIMENT}"
-echo "mode=${OUTPUT_MODE} coordinates=${USE_COORDINATES} positive=${POSITIVE_WEIGHT} background=${BACKGROUND_WEIGHT} checkpoint=${CHECKPOINT_MODE}"
+echo "mode=${OUTPUT_MODE} coordinates=${USE_COORDINATES} positive=${POSITIVE_WEIGHT} background=${BACKGROUND_WEIGHT} dice=${DICE_WEIGHT} hard_bg=${HARD_BACKGROUND_WEIGHT} checkpoint=${CHECKPOINT_MODE}"
 nvidia-smi
 python -u -m gcnm_pvi.train_faithful_gcnm "${ARGS[@]}"
 

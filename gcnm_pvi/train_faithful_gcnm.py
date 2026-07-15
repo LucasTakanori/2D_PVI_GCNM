@@ -17,7 +17,11 @@ from torch_geometric.loader import DataLoader
 
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
-from gcnm_pvi.gcnm_model import GCNBlock, PhysicsProposalResidualGCNBlock
+from gcnm_pvi.gcnm_model import (
+    GCNBlock,
+    PhysicsProposalResidualGCNBlock,
+    ShallowPhysicsResidualGCNBlock,
+)
 from gcnm_pvi.iterative_physics import dataset_lm_directions, diagnostics_summary
 from gcnm_pvi.runtime import build_runtime
 
@@ -86,20 +90,79 @@ def _model(mode: str, channels: list[int], in_channels: int):
             channels,
             in_channels=in_channels,
         ).float()
+    if mode == "shallow_residual":
+        return ShallowPhysicsResidualGCNBlock(
+            channels,
+            in_channels=in_channels,
+        ).float()
     raise ValueError(f"unknown output mode {mode}")
 
 
-def _loss(model, batch, background_weight: float) -> torch.Tensor:
+def _soft_support_dice_loss(prediction: torch.Tensor, batch) -> torch.Tensor:
+    """Differentiable vessel-support Dice, averaged per graph.
+
+    The adaptive threshold is derived only from each clean training target.
+    This loss is never used as evidence on real subject data.
+    """
+    losses = []
+    boundaries = batch.ptr if hasattr(batch, "ptr") else [0, len(prediction)]
+    for start, stop in zip(boundaries[:-1], boundaries[1:]):
+        pred = prediction[start:stop, 0]
+        target = batch.y[start:stop, 0]
+        support = torch.abs(target) > 1e-8
+        if not torch.any(support):
+            continue
+        reference = torch.median(torch.abs(target[support])).detach().clamp_min(1e-6)
+        probability = torch.sigmoid(
+            (torch.relu(pred) - 0.25 * reference) / (0.10 * reference + 1e-6)
+        )
+        truth = support.to(probability.dtype)
+        intersection = torch.sum(probability * truth)
+        dice = (2.0 * intersection + 1e-6) / (
+            torch.sum(probability) + torch.sum(truth) + 1e-6
+        )
+        losses.append(1.0 - dice)
+    if not losses:
+        return prediction.new_tensor(0.0)
+    return torch.stack(losses).mean()
+
+
+def _loss(
+    model,
+    batch,
+    background_weight: float,
+    dice_weight: float = 0.0,
+    hard_background_weight: float = 0.0,
+    hard_background_fraction: float = 0.05,
+) -> torch.Tensor:
     prediction = model(batch)
     loss = torch.mean(batch.weights * (prediction - batch.y) ** 2)
     if background_weight > 0:
         mask = batch.background.bool()
         if torch.any(mask):
             loss = loss + float(background_weight) * torch.mean(prediction[mask] ** 2)
+            if hard_background_weight > 0:
+                background_error = prediction[mask] ** 2
+                count = max(
+                    1,
+                    int(np.ceil(float(hard_background_fraction) * background_error.numel())),
+                )
+                hardest = torch.topk(background_error, k=count, largest=True).values
+                loss = loss + float(hard_background_weight) * torch.mean(hardest)
+    if dice_weight > 0:
+        loss = loss + float(dice_weight) * _soft_support_dice_loss(prediction, batch)
     return loss
 
 
-def _run_epoch(model, loader, background_weight: float, optimizer=None) -> float:
+def _run_epoch(
+    model,
+    loader,
+    background_weight: float,
+    dice_weight: float = 0.0,
+    hard_background_weight: float = 0.0,
+    hard_background_fraction: float = 0.05,
+    optimizer=None,
+) -> float:
     training = optimizer is not None
     model.train(training)
     total, graphs = 0.0, 0
@@ -108,7 +171,14 @@ def _run_epoch(model, loader, background_weight: float, optimizer=None) -> float
         batch = batch.to(device)
         if training:
             optimizer.zero_grad()
-        loss = _loss(model, batch, background_weight)
+        loss = _loss(
+            model,
+            batch,
+            background_weight,
+            dice_weight,
+            hard_background_weight,
+            hard_background_fraction,
+        )
         if training:
             loss.backward()
             optimizer.step()
@@ -194,10 +264,17 @@ def main() -> None:
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--models-dir", type=Path, required=True)
     parser.add_argument("--results-dir", type=Path, required=True)
-    parser.add_argument("--output-mode", choices=["direct", "proposal_residual"], default="direct")
+    parser.add_argument(
+        "--output-mode",
+        choices=["direct", "proposal_residual", "shallow_residual"],
+        default="direct",
+    )
     parser.add_argument("--use-coordinates", action="store_true")
     parser.add_argument("--positive-weight", type=float, default=0.0)
     parser.add_argument("--background-weight", type=float, default=0.0)
+    parser.add_argument("--dice-weight", type=float, default=0.0)
+    parser.add_argument("--hard-background-weight", type=float, default=0.0)
+    parser.add_argument("--hard-background-fraction", type=float, default=0.05)
     parser.add_argument("--checkpoint-mode", choices=["loss", "composite"], default="loss")
     parser.add_argument("--checkpoint-background-coefficient", type=float, default=1.0)
     parser.add_argument("--checkpoint-dice-coefficient", type=float, default=0.25)
@@ -330,10 +407,23 @@ def main() -> None:
         patience = cfg.patience
         iteration_history: list[dict] = []
         for epoch in range(epochs):
-            train_loss = _run_epoch(model, train_loader, args.background_weight, optimizer)
+            train_loss = _run_epoch(
+                model,
+                train_loader,
+                args.background_weight,
+                args.dice_weight,
+                args.hard_background_weight,
+                args.hard_background_fraction,
+                optimizer,
+            )
             with torch.no_grad():
                 validation_loss = _run_epoch(
-                    model, validation_loader, args.background_weight
+                    model,
+                    validation_loader,
+                    args.background_weight,
+                    args.dice_weight,
+                    args.hard_background_weight,
+                    args.hard_background_fraction,
                 )
             score, score_metrics = _checkpoint_score(
                 model,
@@ -377,6 +467,14 @@ def main() -> None:
             "iteration": iteration,
             "feature_order": feature_order,
             "output_mode": args.output_mode,
+            "loss_contract": {
+                "positive_weight": args.positive_weight,
+                "background_weight": args.background_weight,
+                "dice_weight": args.dice_weight,
+                "hard_background_weight": args.hard_background_weight,
+                "hard_background_fraction": args.hard_background_fraction,
+                "dice_supervision": "clean synthetic targets only",
+            },
             "physics": "nonlinear differential F/J/LM recomputed at every stage",
             "best_epoch": best_epoch,
             "best_selection_score": best_score,
@@ -414,6 +512,9 @@ def main() -> None:
         "use_coordinates": args.use_coordinates,
         "positive_weight": args.positive_weight,
         "background_weight": args.background_weight,
+        "dice_weight": args.dice_weight,
+        "hard_background_weight": args.hard_background_weight,
+        "hard_background_fraction": args.hard_background_fraction,
         "checkpoint_mode": args.checkpoint_mode,
         "random_seed": seed,
         "baseline_mode": args.baseline_mode,

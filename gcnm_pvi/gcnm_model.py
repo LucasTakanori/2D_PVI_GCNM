@@ -131,6 +131,61 @@ class PhysicsProposalResidualGCNBlock(GCNBlock):
         return proposal + correction
 
 
+class ShallowPhysicsResidualGCNBlock(torch.nn.Module):
+    """Two-hop, bounded residual refiner around the recomputed LM proposal.
+
+    The original four consecutive ``GCNConv`` operations repeatedly average
+    neighboring elements and can merge two compact vessels.  This block uses
+    only two graph-convolution steps, residual hidden-state connections, and a
+    raw-feature skip into a node-local output head.  The correction is bounded
+    in normalized conductivity units and the zero-initialized head makes a new
+    model start exactly at ``current + LM direction``.
+    """
+
+    def __init__(
+        self,
+        channels,
+        in_channels=5,
+        state_channel=0,
+        update_channel=1,
+        correction_limit=1.0,
+    ):
+        super().__init__()
+        hidden = int(channels[0]) if channels else 64
+        self.state_channel = int(state_channel)
+        self.update_channel = int(update_channel)
+        self.correction_limit = float(correction_limit)
+        self.input_projection = torch.nn.Linear(in_channels, hidden)
+        self.conv1 = GCNConv(hidden, hidden)
+        self.conv2 = GCNConv(hidden, hidden)
+        self.norm1 = torch.nn.LayerNorm(hidden)
+        self.norm2 = torch.nn.LayerNorm(hidden)
+        self.output_head = torch.nn.Linear(in_channels + 3 * hidden, 1)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.input_projection.reset_parameters()
+        self.conv1.reset_parameters()
+        self.conv2.reset_parameters()
+        self.norm1.reset_parameters()
+        self.norm2.reset_parameters()
+        torch.nn.init.zeros_(self.output_head.weight)
+        torch.nn.init.zeros_(self.output_head.bias)
+
+    def forward(self, data):
+        raw, edge_index = data.x, data.edge_index
+        h0 = F.relu(self.input_projection(raw))
+        h1 = h0 + F.relu(self.norm1(self.conv1(h0, edge_index)))
+        h2 = h1 + F.relu(self.norm2(self.conv2(h1, edge_index)))
+        features = torch.cat((raw, h0, h1, h2), dim=1)
+        correction = self.correction_limit * torch.tanh(self.output_head(features))
+        proposal = (
+            raw[:, self.state_channel : self.state_channel + 1]
+            + raw[:, self.update_channel : self.update_channel + 1]
+        )
+        return proposal + correction
+
+
 def trainModel(model, dataset, optimizer, split, batch_size, max_epochs, patience, start_time):
     split = int(split * len(dataset))
     loader_tr = DataLoader(dataset[:split], batch_size=batch_size, shuffle=True)

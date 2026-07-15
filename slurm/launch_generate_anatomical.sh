@@ -31,9 +31,10 @@ SYNTH_VALIDATION="${SYNTH_VALIDATION:-128}"
 SYNTH_TEST="${SYNTH_TEST:-128}"
 SIMULATION_MODE="${SIMULATION_MODE:-linearized}"
 JACOBIAN_BANK_SIZE="${JACOBIAN_BANK_SIZE:-8}"
+VESSEL_COUNT="${VESSEL_COUNT:-mixed}"
 
 echo "job=${SLURM_JOB_ID} host=$(hostname)"
-echo "dataset=${DATASET_DIR} mode=${SIMULATION_MODE} counts=${SYNTH_TRAIN}/${SYNTH_VALIDATION}/${SYNTH_TEST}"
+echo "dataset=${DATASET_DIR} mode=${SIMULATION_MODE} vessels=${VESSEL_COUNT} counts=${SYNTH_TRAIN}/${SYNTH_VALIDATION}/${SYNTH_TEST}"
 
 python -u -m gcnm_pvi.generate_anatomical_dataset \
   --config "${CONFIG}" \
@@ -42,6 +43,7 @@ python -u -m gcnm_pvi.generate_anatomical_dataset \
   --validation "${SYNTH_VALIDATION}" \
   --test "${SYNTH_TEST}" \
   --simulation-mode "${SIMULATION_MODE}" \
-  --jacobian-bank-size "${JACOBIAN_BANK_SIZE}"
+  --jacobian-bank-size "${JACOBIAN_BANK_SIZE}" \
+  --vessel-count "${VESSEL_COUNT}"
 
 deactivate

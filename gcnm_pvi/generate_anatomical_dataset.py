@@ -77,6 +77,7 @@ def _build_linearized_bank(
     size: int,
     *,
     contact_static_sd: float,
+    vessel_count: int | None,
 ) -> list[dict[str, np.ndarray]]:
     """Build fine-mesh anatomical Jacobians for fast anti-inverse-crime data."""
     physics = runtime["physics_fwd"]
@@ -85,7 +86,7 @@ def _build_linearized_bank(
     bank = []
     try:
         for index in range(size):
-            anatomy = sample_anatomy(rng)
+            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
             sigma0_inv, _sigma1_inv, _delta_inv = rasterize_anatomy(inv_points, anatomy)
             sigma0_fwd, _sigma1_fwd, _delta_fwd = rasterize_anatomy(fwd_points, anatomy)
             factors = np.exp(rng.normal(0.0, contact_static_sd, len(electrodes)))
@@ -118,6 +119,7 @@ def generate_split_linearized(
     current_gain_sd: float,
     inverse_matrix: np.ndarray,
     jacobian_bank_size: int,
+    vessel_count: int | None,
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Generate many differential examples from fine-mesh anatomical Jacobians."""
     rng = np.random.default_rng(seed)
@@ -131,11 +133,12 @@ def generate_split_linearized(
         rng,
         jacobian_bank_size,
         contact_static_sd=contact_static_sd,
+        vessel_count=vessel_count,
     )
     truth, baseline, voltage_clean, voltage_noisy, parameters = [], [], [], [], []
     for index in range(count):
         for _attempt in range(100):
-            anatomy = sample_anatomy(rng)
+            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
             _sigma0_inv, _sigma1_inv, delta_inv = rasterize_anatomy(inv_points, anatomy)
             _sigma0_fwd, _sigma1_fwd, delta_fwd = rasterize_anatomy(fwd_points, anatomy)
             if np.count_nonzero(delta_inv) >= 6:
@@ -183,6 +186,7 @@ def generate_split(
     channel_gain_sd: float,
     current_gain_sd: float,
     inverse_matrix: np.ndarray,
+    vessel_count: int | None,
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
     rng = np.random.default_rng(seed)
     center, radius = domain_transform(runtime["mesh_inv"])
@@ -197,7 +201,7 @@ def generate_split(
 
     for index in range(count):
         for _attempt in range(100):
-            anatomy = sample_anatomy(rng)
+            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
             sigma0_inv, _sigma1_inv, delta_inv = rasterize_anatomy(inv_points, anatomy)
             if np.count_nonzero(delta_inv) >= 6:
                 break
@@ -264,7 +268,15 @@ def main() -> None:
         help="Fast fine-Jacobian training data or exact two-solve nonlinear data",
     )
     parser.add_argument("--jacobian-bank-size", type=int, default=3)
+    parser.add_argument(
+        "--vessel-count",
+        choices=["mixed", "1", "2"],
+        default="mixed",
+        help="Force every anatomy to contain one or two vessels, or preserve the mixed distribution",
+    )
     args = parser.parse_args()
+
+    vessel_count = None if args.vessel_count == "mixed" else int(args.vessel_count)
 
     cfg = GcnmConfig.from_yaml(args.config)
     runtime = build_runtime(cfg, include_forward=True)
@@ -290,6 +302,7 @@ def main() -> None:
                 current_gain_sd=args.current_gain_sd,
                 inverse_matrix=inverse_matrix,
                 jacobian_bank_size=args.jacobian_bank_size,
+                vessel_count=vessel_count,
             )
         else:
             arrays, parameters = generate_split(
@@ -304,6 +317,7 @@ def main() -> None:
                 channel_gain_sd=args.channel_gain_sd,
                 current_gain_sd=args.current_gain_sd,
                 inverse_matrix=inverse_matrix,
+                vessel_count=vessel_count,
             )
         np.savez_compressed(args.out_dir / f"{split}.npz", **arrays)
         parameter_path = args.out_dir / f"{split}_anatomy.json"
@@ -317,6 +331,7 @@ def main() -> None:
         "seeds": seeds,
         "simulation_mode": args.simulation_mode,
         "jacobian_bank_size": args.jacobian_bank_size,
+        "vessel_count": args.vessel_count,
         "noise": {
             "white_noise_rel": args.white_noise_rel,
             "correlated_noise_rel": args.correlated_noise_rel,
