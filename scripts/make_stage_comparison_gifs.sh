@@ -14,6 +14,13 @@ RESULTS_DIR="${GCNM_ROOT}/data/faithful_results/${EXPERIMENT}"
 GIF_DIR="${RESULTS_DIR}/gifs"
 SYNTHETIC_PREDICTIONS="${RESULTS_DIR}/evaluation_nonlinear/predictions.npz"
 REAL_PREDICTIONS="${RESULTS_DIR}/evaluation_real_pvi/predictions.npz"
+SYNTHETIC_ANATOMY_JSON="${SYNTHETIC_ANATOMY_JSON:-}"
+if [[ -z "${SYNTHETIC_ANATOMY_JSON}" && "${EXPERIMENT}" == finger_default_* ]]; then
+  candidate="${GCNM_ROOT}/data/finger_default_anatomical_exact/test_anatomy.json"
+  if [[ -f "${candidate}" ]]; then
+    SYNTHETIC_ANATOMY_JSON="${candidate}"
+  fi
+fi
 
 for required in "${SYNTHETIC_PREDICTIONS}" "${REAL_PREDICTIONS}"; do
   if [[ ! -f "${required}" ]]; then
@@ -27,13 +34,19 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/gcnm-mpl-${SLURM_JOB_ID:-local}}"
 # Deliberate word splitting turns the user-facing space-delimited sample list
 # into individual argparse values.
 # shellcheck disable=SC2086
-"${GCNM_PYTHON}" "${GCNM_ROOT}/scripts/make_subject006_pvi_gcnm_gif.py" \
-  --split synthetic \
-  --experiment "${EXPERIMENT}" \
-  --predictions "${SYNTHETIC_PREDICTIONS}" \
-  --expected-stages "${EXPECTED_STAGES}" \
-  --samples ${SAMPLES} \
+SYNTHETIC_ARGS=(
+  --split synthetic
+  --experiment "${EXPERIMENT}"
+  --predictions "${SYNTHETIC_PREDICTIONS}"
+  --expected-stages "${EXPECTED_STAGES}"
   --out "${GIF_DIR}/phantom_truth_pvi_vs_${EXPECTED_STAGES}_stages.gif"
+)
+if [[ -n "${SYNTHETIC_ANATOMY_JSON}" ]]; then
+  SYNTHETIC_ARGS+=(--synthetic-anatomy-json "${SYNTHETIC_ANATOMY_JSON}")
+fi
+"${GCNM_PYTHON}" "${GCNM_ROOT}/scripts/make_subject006_pvi_gcnm_gif.py" \
+  "${SYNTHETIC_ARGS[@]}" \
+  --samples ${SAMPLES}
 
 REAL_ARGS=(
   --split test

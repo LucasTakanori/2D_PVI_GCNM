@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from io import BytesIO
 import math
 from pathlib import Path
@@ -93,35 +94,56 @@ def _render_frame(
     panel_titles: list[str],
     footer: str,
     limit: float,
+    waveform: dict[str, object] | None = None,
 ) -> Image.Image:
     if len(images) != len(panel_titles):
         raise ValueError(
             f"received {len(images)} images but {len(panel_titles)} panel titles"
         )
-    columns = min(4, len(images))
-    rows = math.ceil(len(images) / columns)
+    panel_count = len(images) + int(waveform is not None)
+    columns = min(5, panel_count)
+    rows = math.ceil(panel_count / columns)
     figure, axes_grid = plt.subplots(
         rows,
         columns,
-        figsize=(3.0 * columns, 2.65 * rows + 0.55),
+        figsize=(3.0 * columns, 3.25 * rows + 0.70),
         dpi=120,
         squeeze=False,
     )
     axes = list(axes_grid.ravel())
     shown = None
     for axis, image, title in zip(axes, images, panel_titles):
-        shown = axis.imshow(image, cmap="RdBu_r", vmin=-limit, vmax=limit, origin="lower")
+        # MATLAB/PVI m2i rows run opposite to normalized mesh y.  ``origin=upper``
+        # restores the simulator convention: negative y is the lower finger side.
+        shown = axis.imshow(image, cmap="RdBu_r", vmin=-limit, vmax=limit, origin="upper")
         axis.set_title(title, fontsize=10)
         axis.axis("off")
-    for axis in axes[len(images) :]:
+    if waveform is not None:
+        axis = axes[len(images)]
+        time = np.asarray(waveform["time"], dtype=float)
+        values = np.asarray(waveform["values"], dtype=float)
+        cursor = int(waveform["cursor"])
+        axis.plot(time, values, color="#C0304A", linewidth=2.2)
+        axis.fill_between(time, 0.0, values, color="#C0304A", alpha=0.10)
+        axis.axvline(time[cursor], color="#13233B", linestyle="--", linewidth=1.5)
+        axis.scatter(
+            [time[cursor]], [values[cursor]], color="#C0304A", edgecolor="white",
+            linewidth=0.7, s=32, zorder=3,
+        )
+        axis.set_title(str(waveform["title"]), fontsize=10)
+        axis.set_xlabel("Time / phase", fontsize=8)
+        axis.set_ylabel(str(waveform["ylabel"]), fontsize=8)
+        axis.grid(color="0.88", linewidth=0.6)
+        axis.tick_params(labelsize=7)
+    for axis in axes[panel_count:]:
         axis.axis("off")
     figure.suptitle(f"{beat_label}  |  {split_label}", fontsize=11, y=0.98)
     figure.text(0.5, 0.02, footer, ha="center", fontsize=8, color="0.35")
     figure.subplots_adjust(
         left=0.025,
-        right=0.90,
-        top=0.91,
-        bottom=0.07,
+        right=0.985,
+        top=0.82,
+        bottom=0.18,
         wspace=0.08,
         hspace=0.18,
     )
@@ -129,8 +151,10 @@ def _render_frame(
         colorbar = figure.colorbar(
             shown,
             ax=axes[: len(images)],
-            fraction=0.025,
-            pad=0.025,
+            orientation="horizontal",
+            fraction=0.055,
+            pad=0.08,
+            aspect=max(24, 8 * len(images)),
         )
         colorbar.set_label(r"$\Delta\sigma$ (S/m)", fontsize=8)
     buffer = BytesIO()
@@ -198,7 +222,14 @@ def build_cardiac_gif(
     frames: list[Image.Image] = []
     for beat_number, period_id in enumerate(period_ids, start=1):
         beat_label = f"Beat {beat_number} (period {period_id})"
-        for phase, sample_index in _period_indices(period_id, meta):
+        period_entries = _period_indices(period_id, meta)
+        period_samples = [sample for _phase, sample in period_entries]
+        measured_trace = np.sqrt(
+            np.mean(np.asarray(meta["V"])[period_samples] ** 2, axis=1)
+        )
+        measured_trace /= max(float(np.max(np.abs(measured_trace))), 1e-12)
+        trace_time = np.arange(len(period_entries), dtype=float)
+        for trace_index, (phase, sample_index) in enumerate(period_entries):
             frames.append(
                 _render_frame(
                     _panel_images(mapping, [reference], gcnm_stages, sample_index),
@@ -207,6 +238,13 @@ def build_cardiac_gif(
                     panel_titles=panel_titles,
                     footer=f"phase {phase}   |   shared scale +/- {limit:.4f} S/m",
                     limit=limit,
+                    waveform={
+                        "time": trace_time,
+                        "values": measured_trace,
+                        "cursor": trace_index,
+                        "title": "Measured ΔV RMS across beat",
+                        "ylabel": "Normalized RMS",
+                    },
                 )
             )
 
@@ -228,6 +266,7 @@ def build_synthetic_gif(
     frame_duration_ms: int,
     hold_frames: int,
     expected_stages: int | None,
+    anatomy_json: Path | None,
 ) -> None:
     mapping = MeshMappings(
         ROOT / "data/ring_meshes/subject006_US120/ring_US120_mappings_40.h5",
@@ -254,9 +293,30 @@ def build_synthetic_gif(
             )
 
     limit = _shared_limit(references, gcnm_stages, sample_indices)
+    anatomy_records = None
+    if anatomy_json is not None:
+        anatomy_records = json.loads(anatomy_json.read_text(encoding="utf-8"))
+        if len(anatomy_records) < len(truth):
+            raise ValueError(
+                f"{anatomy_json} has {len(anatomy_records)} records for "
+                f"{len(truth)} predictions"
+            )
     frames: list[Image.Image] = []
     for beat_number, sample_index in enumerate(sample_indices, start=1):
         beat_label = f"Beat {beat_number} (holdout phantom {sample_index})"
+        waveform = None
+        if anatomy_records is not None:
+            record = anatomy_records[sample_index]["waveform"]
+            values = np.asarray(record["values"], dtype=float)
+            waveform = {
+                "time": np.linspace(
+                    0.0, float(record["duration_s"]), len(values), endpoint=False
+                ),
+                "values": values,
+                "cursor": int(record["selected_phase"]),
+                "title": "Synthetic source waveform",
+                "ylabel": "Normalized amplitude",
+            }
         frame = _render_frame(
             _panel_images(mapping, references, gcnm_stages, sample_index),
             beat_label=beat_label,
@@ -264,6 +324,7 @@ def build_synthetic_gif(
             panel_titles=panel_titles,
             footer=f"static holdout phantom   |   shared scale +/- {limit:.4f} S/m",
             limit=limit,
+            waveform=waveform,
         )
         frames.extend([frame] * hold_frames)
 
@@ -332,6 +393,12 @@ def main() -> None:
     parser.add_argument("--meta", type=Path, default=None)
     parser.add_argument("--predictions", type=Path, default=None)
     parser.add_argument(
+        "--synthetic-anatomy-json",
+        type=Path,
+        default=None,
+        help="Optional simulator anatomy records providing the source waveform.",
+    )
+    parser.add_argument(
         "--periods",
         nargs="+",
         type=int,
@@ -388,6 +455,7 @@ def main() -> None:
             frame_duration_ms=args.frame_ms,
             hold_frames=args.hold_frames,
             expected_stages=args.expected_stages,
+            anatomy_json=args.synthetic_anatomy_json,
         )
         return
 

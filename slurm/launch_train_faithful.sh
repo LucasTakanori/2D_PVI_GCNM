@@ -34,6 +34,7 @@ DATASET_DIR="${DATASET_DIR:-${REPO_ROOT}/data/subject006_anatomical_full}"
 EXPERIMENT="${EXPERIMENT:?set EXPERIMENT to a unique result name}"
 OUTPUT_MODE="${OUTPUT_MODE:-direct}"
 USE_COORDINATES="${USE_COORDINATES:-0}"
+USE_VOLTAGE_MLP="${USE_VOLTAGE_MLP:-0}"
 POSITIVE_WEIGHT="${POSITIVE_WEIGHT:-0}"
 BACKGROUND_WEIGHT="${BACKGROUND_WEIGHT:-0}"
 DICE_WEIGHT="${DICE_WEIGHT:-0}"
@@ -70,6 +71,7 @@ ARGS=(
   --baseline-conductivity "${BASELINE_CONDUCTIVITY}"
 )
 if [[ "${USE_COORDINATES}" == "1" ]]; then ARGS+=(--use-coordinates); fi
+if [[ "${USE_VOLTAGE_MLP}" == "1" ]]; then ARGS+=(--use-voltage-mlp); fi
 if [[ -n "${MAX_TRAIN}" ]]; then ARGS+=(--max-train "${MAX_TRAIN}"); fi
 if [[ -n "${MAX_VALIDATION}" ]]; then ARGS+=(--max-validation "${MAX_VALIDATION}"); fi
 if [[ -n "${EPOCHS}" ]]; then ARGS+=(--epochs "${EPOCHS}"); fi
@@ -77,7 +79,7 @@ if [[ -n "${ITERATIONS}" ]]; then ARGS+=(--iterations "${ITERATIONS}"); fi
 if [[ "${ALLOW_OVERWRITE}" == "1" ]]; then ARGS+=(--allow-overwrite); fi
 
 echo "job=${SLURM_JOB_ID} host=$(hostname) experiment=${EXPERIMENT}"
-echo "mode=${OUTPUT_MODE} coordinates=${USE_COORDINATES} positive=${POSITIVE_WEIGHT} background=${BACKGROUND_WEIGHT} dice=${DICE_WEIGHT} hard_bg=${HARD_BACKGROUND_WEIGHT} checkpoint=${CHECKPOINT_MODE}"
+echo "mode=${OUTPUT_MODE} coordinates=${USE_COORDINATES} voltage_mlp=${USE_VOLTAGE_MLP} positive=${POSITIVE_WEIGHT} background=${BACKGROUND_WEIGHT} dice=${DICE_WEIGHT} hard_bg=${HARD_BACKGROUND_WEIGHT} checkpoint=${CHECKPOINT_MODE}"
 nvidia-smi
 python -u -m gcnm_pvi.train_faithful_gcnm "${ARGS[@]}"
 
