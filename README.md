@@ -91,6 +91,13 @@ See `cluster.env.example`.
 
 ## Complete project workflow
 
+The current production workflow is the 91-subject b045 coordinate-direct
+rollout. Its exact environment, registry, split, validation, submission,
+resume, and output commands are in
+[`docs/COORDINATE_ROLLOUT_RUNBOOK.md`](docs/COORDINATE_ROLLOUT_RUNBOOK.md).
+The sections below retain the earlier subject-6 faithful-GCNM workflow because
+it documents how the selected coordinate architecture was established.
+
 ### 1. Export a ring mesh
 
 The subject-6 ring was identified as `US120`. Export the forward mesh, inverse
@@ -255,10 +262,10 @@ tectonic --keep-logs --keep-intermediates main.tex
 Open `reports/gcnm_pvi_latex/main.pdf` for the mathematical derivation, original
 code audit, experiment tables, output comparisons, limitations, and research plan.
 
-## Fixed Slurm resources
+## Historical faithful-pilot Slurm resources
 
-The project launchers intentionally preserve the allocation used by the verified
-experiments:
+The original faithful-pilot launchers preserve the allocation used by those
+verified subject-6 experiments:
 
 | Resource | Value |
 |---|---|
@@ -272,6 +279,10 @@ experiments:
 Model architecture and optimizer settings remain in
 `configs/subject006_anatomical_gcnm.yaml`: two stages, three 64-channel hidden
 layers, learning rate 0.001, batch size 16, at most 150 epochs, patience 15.
+
+The current packed 91-subject rollout has a separate resource contract: up to
+four GPUs, 64 CPUs, 1,000 GB of memory, and a 10-day wall limit. See the
+production runbook for its job-by-job allocation and resume behavior.
 
 ## Reproduced results
 
@@ -333,3 +344,4 @@ files.
 - `SUBJECT006_STATUS.md` -- ring-size and production reconstruction evidence
 - `IMPLEMENTATION_REPORT.md` -- implementation and verification history
 - `PVI_GCNM_ADAPTATION_PLAN.md` -- original adaptation analysis
+- `docs/COORDINATE_ROLLOUT_RUNBOOK.md` -- accepted 91-subject production path

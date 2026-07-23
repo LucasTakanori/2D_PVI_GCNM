@@ -427,3 +427,340 @@ Suggested visual:
 
 Suggested visual:
 [`faithful_real_pvi_gallery.pdf`](reports/gcnm_pvi_latex/figures/faithful_real_pvi_gallery.pdf)
+
+---
+
+# Current-state update deck — simple presentation version
+
+This section is the recommended update for the current project meeting. The
+language is deliberately conversational: the presenter can read the “talking
+point” paragraphs without turning the slide into a methods paper.
+
+## Slide 1 — The big picture
+
+**On the slide**
+
+> We are replacing the noisy Newton image representation used by the BP learner
+> with a learned, mesh-aware reconstruction that still follows the PVI physics.
+
+**Talking point**
+
+The project has three connected parts. First, we generate realistic conductivity
+beats. Second, the PVI forward FEM turns those conductivity changes into the
+voltages that the electrodes would measure. Third, a GCNM learns the inverse map
+from those voltages back to a conductivity representation. Only after those
+three pieces agree do we train the BP models.
+
+```text
+conductivity beat → PVI forward FEM → HP/LP voltage → GCNM → image representation → BP model
+```
+
+The goal is not to make a pixel-for-pixel copy of Newton. Newton is our reference
+pipeline, but the synthetic conductivity truth gives us a cleaner way to judge
+whether the learned reconstruction is useful.
+
+## Slide 2 — What we tried during the investigation
+
+**On the slide**
+
+- Clean ellipse and one-/two-vessel phantoms.
+- Coordinate GCNMs and residual/proposal variants.
+- Saved-anatomical and homogeneous baselines.
+- Ten-stage unrolling, core-guided models, physics-calibrated models, and
+  direction-anchored models.
+- Spatial slots, global-voltage vessel slots, diffusion slots, and primitive
+  coordinate models.
+- Ring-specific packs and a 50-sample whole-beat generator.
+
+**Talking point**
+
+Each experiment answered a specific question: can coordinates help the network
+separate vessels, can explicit vessel slots prevent merging, can diffusion model
+the surrounding tissue, and can a better baseline transfer from synthetic data to
+real PVI? Some models looked excellent on synthetic images but failed on real
+voltage magnitude or painted broad background structure. Those are useful results:
+they told us which inductive biases were not transferable.
+
+## Slide 3 — The model families and their building blocks
+
+### Coordinate GCNM
+
+```text
+measured voltage + current conductivity
+        ↓
+PVI forward solve and Jacobian
+        ↓
+LM/Newton proposal on the element graph
+        ↓
+GCN layers with x, y, r coordinate features
+        ↓
+signed dense conductivity field
+        ↓
+recompute physics → stage 2
+```
+
+The coordinate features give the graph an explicit notion of location. The output
+is dense and signed, so negative conductivity changes are allowed. The selected
+protocol uses two recomputed-physics stages, homogeneous (0.7\,\mathrm{S/m})
+baseline, positive weight \(\alpha=1\), background weight \(\beta=0.25\), and
+composite checkpoint selection.
+
+### Global-voltage vessel-slot GCNM
+
+```text
+voltage waveform + graph/Jacobian features
+        ↓
+signed vessel localizer
+        ↓
+global voltage/RMS and beat geometry features
+        ↓
+vessel parameter refiner
+        ↓
+signed ellipse/halo fields on the mesh
+```
+
+The slots force the model to represent a small number of vessels explicitly:
+centre, axes, angle, signed amplitude, diffusion fraction, and length. We chose
+this because the inverse problem has very few measurements compared with mesh
+elements; a structured vessel representation can be easier to identify than a
+free dense image. The trade-off is that the model can impose its prior too
+strongly, so we keep the literal stage outputs and voltage residuals visible.
+
+### Diffusion-slot family
+
+This family includes a voltage MLP and learned diffusion slots. It remains a
+valuable comparison model, but it is parked for the current BP pilot while we
+first establish the HP/LP contract with the coordinate and global-voltage-slot
+families.
+
+## Slide 4 — What happened with the losses
+
+**On the slide**
+
+| Loss or block | Why we tried it | What we learned |
+|---|---|---|
+| Element/image MSE | Basic conductivity accuracy | Allows diffuse or background shortcuts |
+| Positive/background weighting | Emphasize vessel changes without painting the ring | Improves the useful foreground/background balance |
+| Dice/localization | Encourage vessel support overlap | Helps structure, but can reward overly broad support |
+| Slot separation | Keep two vessels apart | Reduces vessel merging; can become prior-driven |
+| Attention | Let the model select informative measurements | Useful ablation, not a universal solution |
+| Correlation | Match temporal/voltage shape | Helpful diagnostic; not enough by itself |
+| Forward-voltage residual | Check physical consistency | Required to detect a visually plausible but physically wrong image |
+
+**Talking point**
+
+No single loss solved the problem. Image quality, vessel localization, and voltage
+consistency measure different things. We therefore report all three instead of
+choosing a model from one attractive image or one scalar loss.
+
+## Slide 5 — Synthetic data: from a small phantom to the current pack
+
+**On the slide**
+
+- Earlier packs: simple ellipses, limited morphology, and frame-level sampling.
+- Rejected generalized beat pack: retained only 4 or 10 frames per beat, not the
+  required 50 samples per beat.
+- Current US120 pack: 200 virtual anatomies, 1,000 complete beats, 50 samples per
+  beat = 50,000 frames per HP/LP component.
+- Split by anatomy: 800/100/100, with nonlinear validation and test anatomies.
+
+**Talking point**
+
+The improvement is not just “more samples.” Each sample is a complete beat with a
+different anatomy and morphology. We vary vessel size, position, rotation,
+waveform shape, asymmetry, timing, tissue conductivities, diffusion, and signed
+amplitude. We also keep the train/validation/test split at the anatomy level so a
+slightly modified copy of the same finger cannot appear in both partitions.
+
+## Slide 6 — Why the first HP/LP image attempt failed
+
+**On the slide**
+
+```text
+archived HP resistance ──ΔV = −IΔR──► HP voltage
+                                      │
+                                      └─► GCNM trained/output as absolute σ image
+                                           └─ called “pviHP/pviLP”  ✗
+
+archived LP resistance ──ΔV = −IΔR──► LP voltage
+                                      │
+                                      └─► GCNM trained/output as absolute σ image
+                                           └─ called “pviLP/pviHP”  ✗
+```
+
+**Talking point**
+
+The first export did convert the archived HP and LP resistance fields into voltage,
+but it used those already-separated component voltages as if they were the complete
+absolute voltage input for an absolute-conductivity GCNM. It then treated the two
+learned GCNM stages as if they were the PVI HP and LP fields. Both assumptions were
+wrong. A GCNM stage is an inverse reconstruction stage; HP and LP are temporal
+components of the measured signal. The resulting images could look plausible, but
+their meaning, magnitude, and morphology did not match what `pvi_ml` expects. We
+stopped the export instead of training BP models on mislabeled fields.
+
+### What PVI/Newton actually uses
+
+The EIT instrument measures complex voltage:
+
+\[
+\mathbf{v}_{\mathrm{meas}}
+=
+\mathbf{v}_{\mathrm{real}}
++j\mathbf{v}_{\mathrm{imag}}.
+\]
+
+The acquisition software can express these as BioZ resistance and reactance:
+
+\[
+\mathbf{R}=-\frac{\mathbf{v}_{\mathrm{real}}}{I},
+\qquad
+\mathbf{X}=-\frac{\mathbf{v}_{\mathrm{imag}}}{I}.
+\]
+
+For the production PVI/Newton images, the inverse uses the **real/in-phase
+voltage** (equivalently the resistance channel after conversion):
+
+\[
+\Delta\mathbf{v}_{\mathrm{real}}=-I\,\Delta\mathbf{R}.
+\]
+
+The reactance channel is not used to create the current PVI HP/LP images. It is
+retained for BioZ/complex-impedance experiments. Therefore the HDF5 HP/LP
+resistance fields are not a different modality from the voltage used by Newton;
+they are the production representation of its real voltage channel. The HDF5
+reactance fields are separate and are not part of this image path.
+
+## Slide 7 — The fix: one GCNM for HP and one GCNM for LP
+
+**On the slide**
+
+```text
+absolute conductivity beat σ(t)
+        ↓ PVI forward FEM
+absolute real electrode voltage vreal(t)
+        ↓ production filter + 100-frame moving mean
+V_HP = V_full − V_LP       V_LP = movmean(V_full, 100)
+        ↓                         ↓
+HP GCNM (two stages)         LP GCNM (two stages)
+        ↓                         ↓
+hp_s1, hp_s2                 lp_s1, lp_s2
+```
+
+**Talking point**
+
+We now generate the continuous absolute physiology first. The forward FEM creates
+the corresponding absolute real electrode voltage, and only then do we apply the
+production temporal filter and moving-mean split. This keeps the HP and LP signals
+physically coupled and preserves their relative magnitude. We then train two
+independent component-specific GCNMs per architecture: one for HP and one for LP.
+Each component GCNM still has two learned reconstruction stages, but those stages
+are never renamed as HP or LP.
+
+## Slide 8 — Why we used the HDF5 files first
+
+**On the slide**
+
+- The HDF5 files already contain accepted samples, BP waveforms, timing, masks,
+  subject IDs, and HP/LP resistance fields.
+- The raw ScioSpec archive is roughly 300 GB more data.
+- Raw data still require alignment, filtering, segmentation, and manual acceptance.
+- HDF5 lets us test the new representation on exactly the same windows as PVI ML.
+
+**Talking point**
+
+This is a controlled engineering decision, not a claim that raw EIT is unnecessary
+forever. We use HDF5 to avoid changing the sample population while we test the
+representation. A raw-data audit remains possible later, but it should not be
+mixed into the first fair BP comparison.
+
+## Slide 9 — Three channels versus six channels
+
+**On the slide**
+
+The existing image learner uses three effective channels:
+
+\[
+[\,\widehat{\Delta\sigma}_{HP},
+\ \partial_t\widehat{\Delta\sigma}_{LP},
+\ \partial_t^2\widehat{\Delta\sigma}_{LP}\,].
+\]
+
+Our first GCNM BP pilot uses:
+
+\[
+[\,s_2,\ \partial_t s_1,\ \partial_t^2s_1\,],
+\]
+
+where (s_1,s_2) are literal stages of the component-specific reconstruction.
+
+The six-channel ablation would expose both literal stages for both components:
+
+\[
+[hp\_s1,hp\_s2,lp\_s1,lp\_s2]
+\]
+
+plus the corresponding temporal derivatives required by the learner. We start
+with three channels to match the existing PVI-ML contract and only add six
+channels if the pilot shows that the extra stage information helps.
+
+## Slide 10 — The BP architecture we are testing now
+
+**On the slide**
+
+```text
+Parquet sample (five periods × 50 frames)
+        ↓
+same pvi_ml sequence processing and derivatives
+        ↓
+CRT encoder/temporal transformer
+        ↓
+waveform head OR [DBP, SBP] head
+```
+
+**Talking point**
+
+For the first comparison we keep the BP learner unchanged and change only the
+image loader. The pilot uses CRT, because it is the requested first architecture,
+with both waveform and fiducial targets. Fiducials use the original PVI-ML rule:
+the minimum BP value is DBP and the maximum is SBP. We are running both coordinate
+and global-voltage vessel-slot representations, first for subject006 and then for
+subject010, with the same mask and frozen source windows.
+
+## Slide 11 — Current state and what is running
+
+**On the slide**
+
+- Synthetic generation `432555`: completed; nonlinear validation passed.
+- Four HP/LP GCNM trainings: completed training/evaluation.
+- Manifest repair `432733`: completed after a filename bookkeeping failure.
+- Parquet export `432737_[0-1]`: currently running for subject006/010.
+- Real GIFs `432739_[0-7]`: waiting on export.
+- CRT BP submission `432741`: waiting on export; it will submit 8 jobs.
+
+**Talking point**
+
+The relaunch was not caused by bad model quality. The models finished, but the
+manifest recorder expected old generic checkpoint names instead of the new
+component-specific names. We repaired the recorder and continued from the existing
+checkpoints. The current decision will be based on the exported data, GIFs, and BP
+metrics, and the final quality judgment remains open.
+
+## Slide 12 — Next steps and decision points
+
+1. Finish and validate both subject006/010 Parquet roots.
+2. Inspect eight real GIFs against the archived Newton component references.
+3. Run eight CRT BP pilots: two families × two targets × two subjects.
+4. Compare waveform metrics and fiducial MAE/SD, tolerance rates, (R^2), and
+   concordance correlation.
+5. Decide whether the three-channel representation is enough.
+6. If needed, run the six-channel ablation using the same windows and splits.
+7. Only after the pilot decision, scale export and BP training to all rings and
+   subjects.
+
+**Closing message**
+
+> We have moved from trying many inverse architectures to testing a clear,
+> physically matched representation. The next result is not just a better-looking
+> reconstruction; it is whether that representation gives the BP learner useful,
+> repeatable information on the same samples used by PVI ML.
