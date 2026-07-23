@@ -78,6 +78,7 @@ def sample_anatomy(
     rng: np.random.Generator,
     *,
     vessel_count: int | None = None,
+    minimum_vessel_gap: float = 0.0,
 ) -> AnatomyParameters:
     """Draw one arm cross-section with a bone and one or two vessels.
 
@@ -86,6 +87,8 @@ def sample_anatomy(
     """
     if vessel_count not in {None, 1, 2}:
         raise ValueError("vessel_count must be None, 1, or 2")
+    if minimum_vessel_gap < 0:
+        raise ValueError("minimum_vessel_gap must be non-negative")
     rotation = float(rng.uniform(-np.pi, np.pi))
     skin_thickness = float(rng.uniform(0.035, 0.075))
     fat_thickness = float(rng.uniform(0.08, 0.20))
@@ -105,18 +108,32 @@ def sample_anatomy(
     for _ in range(count):
         for _attempt in range(200):
             x, y = _sample_ellipse_center(rng, radial_limit=0.55)
-            distance_to_bone = np.hypot(x - bone_x, y - bone_y)
-            if distance_to_bone > max(bone.axis_a, bone.axis_b) + 0.10:
-                break
-        vessels.append(
-            Ellipse(
+            candidate = Ellipse(
                 center_x=float(x),
                 center_y=float(y),
                 axis_a=float(rng.uniform(0.09, 0.18)),
                 axis_b=float(rng.uniform(0.07, 0.14)),
                 angle=float(rng.uniform(-np.pi, np.pi)),
             )
-        )
+            distance_to_bone = np.hypot(x - bone_x, y - bone_y)
+            clears_bone = (
+                distance_to_bone
+                > max(bone.axis_a, bone.axis_b)
+                + max(candidate.axis_a, candidate.axis_b)
+                + 0.02
+            )
+            clears_vessels = all(
+                np.hypot(x - vessel.center_x, y - vessel.center_y)
+                > max(candidate.axis_a, candidate.axis_b)
+                + max(vessel.axis_a, vessel.axis_b)
+                + minimum_vessel_gap
+                for vessel in vessels
+            )
+            if clears_bone and clears_vessels:
+                break
+        else:
+            raise RuntimeError("could not place separated vascular ellipses")
+        vessels.append(candidate)
         vessel_delta.append(float(rng.uniform(0.025, 0.11)))
 
     # A random cardiac phase prevents the network from assuming a fixed peak.

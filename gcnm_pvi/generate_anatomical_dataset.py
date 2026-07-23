@@ -78,6 +78,7 @@ def _build_linearized_bank(
     *,
     contact_static_sd: float,
     vessel_count: int | None,
+    minimum_vessel_gap: float,
 ) -> list[dict[str, np.ndarray]]:
     """Build fine-mesh anatomical Jacobians for fast anti-inverse-crime data."""
     physics = runtime["physics_fwd"]
@@ -86,14 +87,18 @@ def _build_linearized_bank(
     bank = []
     try:
         for index in range(size):
-            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
+            anatomy = sample_anatomy(
+                rng,
+                vessel_count=vessel_count,
+                minimum_vessel_gap=minimum_vessel_gap,
+            )
             sigma0_inv, _sigma1_inv, _delta_inv = rasterize_anatomy(inv_points, anatomy)
             sigma0_fwd, _sigma1_fwd, _delta_fwd = rasterize_anatomy(fwd_points, anatomy)
             factors = np.exp(rng.normal(0.0, contact_static_sd, len(electrodes)))
             for electrode, impedance in zip(electrodes, base_impedance * factors):
                 electrode.impedance = float(impedance)
             forward = physics._forward(sigma0_fwd)
-            jacobian = np.asarray(forward.compute_jacobian(), dtype=np.float64)
+            jacobian = np.asarray(physics.jacobian_from_forward(forward), dtype=np.float64)
             bank.append(
                 {
                     "sigma_baseline": sigma0_inv,
@@ -120,6 +125,7 @@ def generate_split_linearized(
     inverse_matrix: np.ndarray,
     jacobian_bank_size: int,
     vessel_count: int | None,
+    minimum_vessel_gap: float,
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Generate many differential examples from fine-mesh anatomical Jacobians."""
     rng = np.random.default_rng(seed)
@@ -134,11 +140,16 @@ def generate_split_linearized(
         jacobian_bank_size,
         contact_static_sd=contact_static_sd,
         vessel_count=vessel_count,
+        minimum_vessel_gap=minimum_vessel_gap,
     )
     truth, baseline, voltage_clean, voltage_noisy, parameters = [], [], [], [], []
     for index in range(count):
         for _attempt in range(100):
-            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
+            anatomy = sample_anatomy(
+                rng,
+                vessel_count=vessel_count,
+                minimum_vessel_gap=minimum_vessel_gap,
+            )
             _sigma0_inv, _sigma1_inv, delta_inv = rasterize_anatomy(inv_points, anatomy)
             _sigma0_fwd, _sigma1_fwd, delta_fwd = rasterize_anatomy(fwd_points, anatomy)
             if np.count_nonzero(delta_inv) >= 6:
@@ -187,6 +198,7 @@ def generate_split(
     current_gain_sd: float,
     inverse_matrix: np.ndarray,
     vessel_count: int | None,
+    minimum_vessel_gap: float,
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
     rng = np.random.default_rng(seed)
     center, radius = domain_transform(runtime["mesh_inv"])
@@ -201,7 +213,11 @@ def generate_split(
 
     for index in range(count):
         for _attempt in range(100):
-            anatomy = sample_anatomy(rng, vessel_count=vessel_count)
+            anatomy = sample_anatomy(
+                rng,
+                vessel_count=vessel_count,
+                minimum_vessel_gap=minimum_vessel_gap,
+            )
             sigma0_inv, _sigma1_inv, delta_inv = rasterize_anatomy(inv_points, anatomy)
             if np.count_nonzero(delta_inv) >= 6:
                 break
@@ -274,6 +290,12 @@ def main() -> None:
         default="mixed",
         help="Force every anatomy to contain one or two vessels, or preserve the mixed distribution",
     )
+    parser.add_argument(
+        "--minimum-vessel-gap",
+        type=float,
+        default=0.0,
+        help="Minimum normalized boundary gap between vascular ellipses",
+    )
     args = parser.parse_args()
 
     vessel_count = None if args.vessel_count == "mixed" else int(args.vessel_count)
@@ -303,6 +325,7 @@ def main() -> None:
                 inverse_matrix=inverse_matrix,
                 jacobian_bank_size=args.jacobian_bank_size,
                 vessel_count=vessel_count,
+                minimum_vessel_gap=args.minimum_vessel_gap,
             )
         else:
             arrays, parameters = generate_split(
@@ -318,6 +341,7 @@ def main() -> None:
                 current_gain_sd=args.current_gain_sd,
                 inverse_matrix=inverse_matrix,
                 vessel_count=vessel_count,
+                minimum_vessel_gap=args.minimum_vessel_gap,
             )
         np.savez_compressed(args.out_dir / f"{split}.npz", **arrays)
         parameter_path = args.out_dir / f"{split}_anatomy.json"
@@ -326,12 +350,19 @@ def main() -> None:
 
     metadata = {
         "target": "clean FEM element conductivity change (not PVI reconstruction)",
-        "mesh": "subject006 US120",
+        "mesh": {
+            "ring": args.config.stem,
+            "forward_path": str(Path(cfg.mesh_fwd_h5).resolve()),
+            "inverse_path": str(Path(cfg.mesh_inv_h5).resolve()),
+            "forward_elements": int(len(runtime["mesh_fwd"].elements)),
+            "inverse_elements": int(len(runtime["mesh_inv"].elements)),
+        },
         "counts": counts,
         "seeds": seeds,
         "simulation_mode": args.simulation_mode,
         "jacobian_bank_size": args.jacobian_bank_size,
         "vessel_count": args.vessel_count,
+        "minimum_vessel_gap": args.minimum_vessel_gap,
         "noise": {
             "white_noise_rel": args.white_noise_rel,
             "correlated_noise_rel": args.correlated_noise_rel,

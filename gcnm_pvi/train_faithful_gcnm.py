@@ -20,9 +20,17 @@ from gcnm_pvi.config import GcnmConfig
 from gcnm_pvi.gcnm_model import (
     GCNBlock,
     PhysicsProposalResidualGCNBlock,
+    PositiveOutput,
     ShallowPhysicsResidualGCNBlock,
+    VoltageConditionedGCNBlock,
 )
-from gcnm_pvi.iterative_physics import dataset_lm_directions, diagnostics_summary
+from gcnm_pvi.iterative_physics import (
+    FixedZeroCurrentLMSolver,
+    LowRankRegularizedSolver,
+    diagnostics_summary,
+    parallel_dataset_absolute_lm_directions,
+    parallel_dataset_lm_directions,
+)
 from gcnm_pvi.runtime import build_runtime
 
 
@@ -34,9 +42,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load(path: Path, limit: int | None = None) -> dict[str, np.ndarray]:
+def _load(
+    path: Path,
+    limit: int | None = None,
+    *,
+    require_resting: bool = False,
+) -> dict[str, np.ndarray]:
     source = np.load(path)
-    required = ("sigma", "sigma_baseline", "V")
+    required = ("sigma", "sigma_baseline", "V") + (
+        ("sigma_resting",) if require_resting else ()
+    )
     missing = [key for key in required if key not in source]
     if missing:
         raise ValueError(f"{path} is missing required arrays: {missing}")
@@ -56,6 +71,9 @@ def _make_dataset(
     scale: float,
     use_coordinates: bool,
     positive_weight: float,
+    voltage: np.ndarray | None = None,
+    voltage_scale: float = 1.0,
+    reference: np.ndarray | None = None,
 ) -> list[Data]:
     dataset: list[Data] = []
     for index in range(len(truth)):
@@ -64,27 +82,63 @@ def _make_dataset(
         if use_coordinates:
             feature_columns.extend(positions.T)
         features = np.column_stack(feature_columns)
-        magnitude = np.abs(target)
-        nonzero = magnitude[magnitude > 0]
-        reference = float(np.median(nonzero)) if nonzero.size else 1.0
-        weights = 1.0 + positive_weight * np.clip(
-            magnitude / max(reference, 1e-8), 0.0, 2.0
+        normalized_reference = (
+            None if reference is None else reference[index] / scale
         )
-        dataset.append(
-            Data(
+        supervised_signal = (
+            target if normalized_reference is None else target - normalized_reference
+        )
+        magnitude = np.abs(supervised_signal)
+        nonzero = magnitude[magnitude > 0]
+        support_reference = float(np.median(nonzero)) if nonzero.size else 1.0
+        weights = 1.0 + positive_weight * np.clip(
+            magnitude / max(support_reference, 1e-8), 0.0, 2.0
+        )
+        graph = Data(
                 edge_index=edge_index,
                 x=torch.tensor(features, dtype=torch.float32),
                 y=torch.tensor(target[:, None], dtype=torch.float32),
                 weights=torch.tensor(weights[:, None], dtype=torch.float32),
                 background=torch.tensor((magnitude <= 1e-8)[:, None]),
-            )
         )
+        if normalized_reference is not None:
+            graph.reference = torch.tensor(
+                normalized_reference[:, None], dtype=torch.float32
+            )
+        if voltage is not None:
+            graph.voltage = torch.tensor(
+                voltage[index][None, :] / max(float(voltage_scale), 1e-12),
+                dtype=torch.float32,
+            )
+        dataset.append(graph)
     return dataset
 
 
-def _model(mode: str, channels: list[int], in_channels: int):
-    if mode == "direct":
-        return GCNBlock(channels, in_channels=in_channels).float()
+def _model(
+    mode: str,
+    channels: list[int],
+    in_channels: int,
+    *,
+    use_voltage_mlp: bool = False,
+    measurements: int = 32,
+    voltage_latent: int = 64,
+):
+    if use_voltage_mlp:
+        if mode not in {"direct", "positive_direct", "proposal_residual"}:
+            raise ValueError(
+                "the voltage-MLP front end supports direct or proposal-residual output"
+            )
+        model = VoltageConditionedGCNBlock(
+            channels,
+            node_features=in_channels,
+            measurements=measurements,
+            voltage_latent=voltage_latent,
+            residual_around_proposal=mode == "proposal_residual",
+        ).float()
+        return PositiveOutput(model).float() if mode == "positive_direct" else model
+    if mode in {"direct", "positive_direct"}:
+        model = GCNBlock(channels, in_channels=in_channels).float()
+        return PositiveOutput(model).float() if mode == "positive_direct" else model
     if mode == "proposal_residual":
         return PhysicsProposalResidualGCNBlock(
             channels,
@@ -109,12 +163,16 @@ def _soft_support_dice_loss(prediction: torch.Tensor, batch) -> torch.Tensor:
     for start, stop in zip(boundaries[:-1], boundaries[1:]):
         pred = prediction[start:stop, 0]
         target = batch.y[start:stop, 0]
+        if hasattr(batch, "reference"):
+            reference = batch.reference[start:stop, 0]
+            pred = pred - reference
+            target = target - reference
         support = torch.abs(target) > 1e-8
         if not torch.any(support):
             continue
         reference = torch.median(torch.abs(target[support])).detach().clamp_min(1e-6)
         probability = torch.sigmoid(
-            (torch.relu(pred) - 0.25 * reference) / (0.10 * reference + 1e-6)
+            (torch.abs(pred) - 0.25 * reference) / (0.10 * reference + 1e-6)
         )
         truth = support.to(probability.dtype)
         intersection = torch.sum(probability * truth)
@@ -134,15 +192,41 @@ def _loss(
     dice_weight: float = 0.0,
     hard_background_weight: float = 0.0,
     hard_background_fraction: float = 0.05,
+    balanced_support: bool = False,
+    correlation_weight: float = 0.0,
+    amplitude_weight: float = 0.0,
+    relative_amplitude_weight: float = 0.0,
+    temporal_delta_weight: float = 0.0,
+    temporal_correlation_weight: float = 0.0,
+    temporal_amplitude_weight: float = 0.0,
+    temporal_group_size: int = 0,
 ) -> torch.Tensor:
     prediction = model(batch)
-    loss = torch.mean(batch.weights * (prediction - batch.y) ** 2)
+    if balanced_support:
+        graph_losses = []
+        boundaries = batch.ptr if hasattr(batch, "ptr") else [0, len(prediction)]
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            pred = prediction[start:stop, 0]
+            target = batch.y[start:stop, 0]
+            support_target = target
+            if hasattr(batch, "reference"):
+                support_target = support_target - batch.reference[start:stop, 0]
+            support = torch.abs(support_target) > 1e-8
+            terms = []
+            if torch.any(support):
+                terms.append(torch.mean((pred[support] - target[support]) ** 2))
+            if torch.any(~support):
+                terms.append(torch.mean((pred[~support] - target[~support]) ** 2))
+            graph_losses.append(torch.stack(terms).mean())
+        loss = torch.stack(graph_losses).mean()
+    else:
+        loss = torch.mean(batch.weights * (prediction - batch.y) ** 2)
     if background_weight > 0:
         mask = batch.background.bool()
         if torch.any(mask):
-            loss = loss + float(background_weight) * torch.mean(prediction[mask] ** 2)
+            background_error = (prediction[mask] - batch.y[mask]) ** 2
+            loss = loss + float(background_weight) * torch.mean(background_error)
             if hard_background_weight > 0:
-                background_error = prediction[mask] ** 2
                 count = max(
                     1,
                     int(np.ceil(float(hard_background_fraction) * background_error.numel())),
@@ -151,6 +235,87 @@ def _loss(
                 loss = loss + float(hard_background_weight) * torch.mean(hardest)
     if dice_weight > 0:
         loss = loss + float(dice_weight) * _soft_support_dice_loss(prediction, batch)
+    if correlation_weight > 0 or amplitude_weight > 0 or relative_amplitude_weight > 0:
+        correlation_losses = []
+        amplitude_losses = []
+        relative_amplitude_losses = []
+        boundaries = batch.ptr if hasattr(batch, "ptr") else [0, len(prediction)]
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            pred = prediction[start:stop, 0]
+            target = batch.y[start:stop, 0]
+            if hasattr(batch, "reference"):
+                reference = batch.reference[start:stop, 0]
+                pred = pred - reference
+                target = target - reference
+            pred_centered = pred - torch.mean(pred)
+            target_centered = target - torch.mean(target)
+            denominator = torch.linalg.vector_norm(pred_centered) * torch.linalg.vector_norm(
+                target_centered
+            )
+            correlation = torch.sum(pred_centered * target_centered) / denominator.clamp_min(
+                1e-8
+            )
+            correlation_losses.append(1.0 - correlation)
+            amplitude_losses.append(
+                (
+                    torch.sqrt(torch.mean(pred * pred) + 1e-8)
+                    - torch.sqrt(torch.mean(target * target) + 1e-8)
+                )
+                ** 2
+            )
+            pred_rms = torch.sqrt(torch.mean(pred * pred) + 1e-12)
+            target_rms = torch.sqrt(torch.mean(target * target) + 1e-12)
+            relative_amplitude_losses.append(
+                torch.log((pred_rms + 1e-6) / (target_rms + 1e-6)) ** 2
+            )
+        if correlation_weight > 0:
+            loss = loss + float(correlation_weight) * torch.stack(correlation_losses).mean()
+        if amplitude_weight > 0:
+            loss = loss + float(amplitude_weight) * torch.stack(amplitude_losses).mean()
+        if relative_amplitude_weight > 0:
+            loss = loss + float(relative_amplitude_weight) * torch.stack(
+                relative_amplitude_losses
+            ).mean()
+    if temporal_delta_weight > 0 or temporal_correlation_weight > 0 or temporal_amplitude_weight > 0:
+        graphs = int(batch.num_graphs)
+        if temporal_group_size <= 1 or graphs % temporal_group_size:
+            raise ValueError(
+                "temporal loss requires complete, fixed-size ordered graph groups"
+            )
+        elements = prediction.numel() // graphs
+        predicted_graphs = prediction[:, 0].reshape(graphs, elements)
+        target_graphs = batch.y[:, 0].reshape(graphs, elements)
+        temporal_losses = []
+        temporal_correlations = []
+        temporal_amplitudes = []
+        for start in range(0, graphs, temporal_group_size):
+            stop = start + temporal_group_size
+            pred = predicted_graphs[start:stop] - predicted_graphs[start : start + 1]
+            target = target_graphs[start:stop] - target_graphs[start : start + 1]
+            target_power = torch.mean(target * target).clamp_min(1e-12)
+            temporal_losses.append(torch.mean((pred - target) ** 2) / target_power)
+            pred_centered = pred - torch.mean(pred)
+            target_centered = target - torch.mean(target)
+            correlation = torch.sum(pred_centered * target_centered) / (
+                torch.linalg.vector_norm(pred_centered)
+                * torch.linalg.vector_norm(target_centered)
+            ).clamp_min(1e-8)
+            temporal_correlations.append(1.0 - correlation)
+            pred_rms = torch.sqrt(torch.mean(pred * pred) + 1e-12)
+            target_rms = torch.sqrt(target_power)
+            temporal_amplitudes.append(
+                torch.log((pred_rms + 1e-6) / (target_rms + 1e-6)) ** 2
+            )
+        if temporal_delta_weight > 0:
+            loss = loss + float(temporal_delta_weight) * torch.stack(temporal_losses).mean()
+        if temporal_correlation_weight > 0:
+            loss = loss + float(temporal_correlation_weight) * torch.stack(
+                temporal_correlations
+            ).mean()
+        if temporal_amplitude_weight > 0:
+            loss = loss + float(temporal_amplitude_weight) * torch.stack(
+                temporal_amplitudes
+            ).mean()
     return loss
 
 
@@ -161,6 +326,14 @@ def _run_epoch(
     dice_weight: float = 0.0,
     hard_background_weight: float = 0.0,
     hard_background_fraction: float = 0.05,
+    balanced_support: bool = False,
+    correlation_weight: float = 0.0,
+    amplitude_weight: float = 0.0,
+    relative_amplitude_weight: float = 0.0,
+    temporal_delta_weight: float = 0.0,
+    temporal_correlation_weight: float = 0.0,
+    temporal_amplitude_weight: float = 0.0,
+    temporal_group_size: int = 0,
     optimizer=None,
 ) -> float:
     training = optimizer is not None
@@ -178,6 +351,14 @@ def _run_epoch(
             dice_weight,
             hard_background_weight,
             hard_background_fraction,
+            balanced_support,
+            correlation_weight,
+            amplitude_weight,
+            relative_amplitude_weight,
+            temporal_delta_weight,
+            temporal_correlation_weight,
+            temporal_amplitude_weight,
+            temporal_group_size,
         )
         if training:
             loss.backward()
@@ -229,7 +410,9 @@ def _checkpoint_score(
     rmse = float(np.sqrt(np.mean((prediction - target) ** 2)))
     truth_rms = max(float(np.sqrt(np.mean(target**2))), 1e-12)
     nrmse = rmse / truth_rms
-    bg_rms = float(np.sqrt(np.mean(prediction[background] ** 2)))
+    bg_rms = float(
+        np.sqrt(np.mean((prediction[background] - target[background]) ** 2))
+    )
     dice = float(np.mean(dice_values)) if dice_values else 0.0
     score = nrmse + background_coefficient * bg_rms - dice_coefficient * dice
     return score, {
@@ -266,26 +449,75 @@ def main() -> None:
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument(
         "--output-mode",
-        choices=["direct", "proposal_residual", "shallow_residual"],
+        choices=["direct", "positive_direct", "proposal_residual", "shallow_residual"],
         default="direct",
     )
     parser.add_argument("--use-coordinates", action="store_true")
+    parser.add_argument(
+        "--use-voltage-mlp",
+        action="store_true",
+        help="Encode all boundary voltages with an MLP and broadcast them to graph nodes",
+    )
+    parser.add_argument("--temporal-delta-weight", type=float, default=0.0)
+    parser.add_argument("--temporal-correlation-weight", type=float, default=0.0)
+    parser.add_argument("--temporal-amplitude-weight", type=float, default=0.0)
+    parser.add_argument("--temporal-group-size", type=int, default=0)
+    parser.add_argument("--voltage-latent", type=int, default=64)
     parser.add_argument("--positive-weight", type=float, default=0.0)
     parser.add_argument("--background-weight", type=float, default=0.0)
     parser.add_argument("--dice-weight", type=float, default=0.0)
     parser.add_argument("--hard-background-weight", type=float, default=0.0)
     parser.add_argument("--hard-background-fraction", type=float, default=0.05)
+    parser.add_argument("--balanced-support-loss", action="store_true")
+    parser.add_argument("--correlation-weight", type=float, default=0.0)
+    parser.add_argument("--amplitude-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--relative-amplitude-weight",
+        type=float,
+        default=0.0,
+        help="log-RMS ratio loss on the dynamic field; use only with background control",
+    )
     parser.add_argument("--checkpoint-mode", choices=["loss", "composite"], default="loss")
     parser.add_argument("--checkpoint-background-coefficient", type=float, default=1.0)
     parser.add_argument("--checkpoint-dice-coefficient", type=float, default=0.25)
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="override config batch size; large frame batches improve GPU occupancy",
+    )
+    parser.add_argument(
+        "--loader-workers",
+        type=int,
+        default=0,
+        help="PyG loader workers (physics parallelism is controlled separately)",
+    )
+    parser.add_argument(
+        "--validation-is-train-copy",
+        action="store_true",
+        help=(
+            "reuse deterministic physics features when the immutable validation "
+            "archive is byte-for-byte the same overfit pack as training"
+        ),
+    )
     parser.add_argument("--max-train", type=int, default=None)
     parser.add_argument("--max-validation", type=int, default=None)
     parser.add_argument("--minimum-conductivity", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--baseline-mode", choices=["saved", "homogeneous"], default="homogeneous"
+    )
+    parser.add_argument(
+        "--physics-contract",
+        choices=["differential", "absolute"],
+        default="differential",
+        help=(
+            "differential uses F(sigma_b+delta)-F(sigma_b); absolute uses "
+            "F(sigma)-V_absolute and predicts absolute conductivity"
+        ),
     )
     parser.add_argument("--baseline-conductivity", type=float, default=0.7)
     parser.add_argument("--allow-overwrite", action="store_true")
@@ -298,8 +530,16 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     runtime = build_runtime(cfg, include_forward=False)
-    train = _load(args.train, args.max_train)
-    validation = _load(args.validation, args.max_validation)
+    train = _load(
+        args.train,
+        args.max_train,
+        require_resting=args.physics_contract == "absolute",
+    )
+    validation = _load(
+        args.validation,
+        args.max_validation,
+        require_resting=args.physics_contract == "absolute",
+    )
     if args.baseline_mode == "homogeneous":
         train["sigma_baseline"] = np.full_like(
             train["sigma_baseline"], args.baseline_conductivity
@@ -309,14 +549,43 @@ def main() -> None:
         )
     positions = element_positions(runtime["mesh_inv"]).astype(np.float32)
     scale = max(float(np.percentile(np.abs(train["sigma"]), 99.5)), 1e-6)
+    voltage_scale = max(float(np.percentile(np.abs(train["V"]), 99.5)), 1e-12)
     iterations = args.iterations or cfg.iterations
     epochs = args.epochs or cfg.max_epochs
     in_channels = 5 if args.use_coordinates else 2
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    current_train = np.zeros_like(train["sigma"])
-    current_validation = np.zeros_like(validation["sigma"])
+    if args.physics_contract == "absolute":
+        current_train = train["sigma_baseline"].copy()
+        current_validation = validation["sigma_baseline"].copy()
+    else:
+        current_train = np.zeros_like(train["sigma"])
+        current_validation = np.zeros_like(validation["sigma"])
     baseline_train = None
     baseline_validation = None
+    if args.validation_is_train_copy:
+        for key in ("sigma", "sigma_baseline", "V"):
+            if not np.array_equal(train[key], validation[key]):
+                raise ValueError(
+                    f"--validation-is-train-copy is invalid because {key} differs"
+                )
+    low_rank_solver = LowRankRegularizedSolver(
+        runtime["mappings"].laplace,
+        runtime["mappings"].num_elements,
+        hyper_pvi=cfg.hyper_pvi,
+        lambda_lm=cfg.lambda_lm,
+    )
+    fixed_first_stage = (
+        FixedZeroCurrentLMSolver(
+            runtime["physics_inv"],
+            np.full(runtime["mappings"].num_elements, args.baseline_conductivity),
+            regularizer=runtime["mappings"].laplace,
+            hyper_pvi=cfg.hyper_pvi,
+            lambda_lm=cfg.lambda_lm,
+            step_size=cfg.lm_step_size,
+        )
+        if args.baseline_mode == "homogeneous"
+        else None
+    )
     existing_checkpoints = list(args.models_dir.glob(f"{args.model_name}_*.pt"))
     existing_report = args.results_dir / f"{args.model_name}_training_report.json"
     if not args.allow_overwrite and (existing_checkpoints or existing_report.exists()):
@@ -338,46 +607,123 @@ def main() -> None:
     physics_reports: list[dict] = []
     start_time = time.time()
     for iteration in range(iterations):
-        current_train = (
-            np.maximum(
-                train["sigma_baseline"] + current_train,
-                float(args.minimum_conductivity),
+        if args.physics_contract == "absolute":
+            current_train = np.maximum(
+                current_train, float(args.minimum_conductivity)
             )
-            - train["sigma_baseline"]
-        )
-        current_validation = (
-            np.maximum(
-                validation["sigma_baseline"] + current_validation,
-                float(args.minimum_conductivity),
+            current_validation = np.maximum(
+                current_validation, float(args.minimum_conductivity)
             )
-            - validation["sigma_baseline"]
-        )
-        direction_train, diag_train, baseline_train = dataset_lm_directions(
-            runtime["physics_inv"],
-            train["sigma_baseline"],
-            current_train,
-            train["V"],
-            regularizer=runtime["mappings"].laplace,
-            hyper_pvi=cfg.hyper_pvi,
-            lambda_lm=cfg.lambda_lm,
-            step_size=cfg.lm_step_size,
-            minimum_conductivity=args.minimum_conductivity,
-            baseline_voltages=baseline_train,
-            progress_label=f"stage {iteration + 1} train",
-        )
-        direction_validation, diag_validation, baseline_validation = dataset_lm_directions(
-            runtime["physics_inv"],
-            validation["sigma_baseline"],
-            current_validation,
-            validation["V"],
-            regularizer=runtime["mappings"].laplace,
-            hyper_pvi=cfg.hyper_pvi,
-            lambda_lm=cfg.lambda_lm,
-            step_size=cfg.lm_step_size,
-            minimum_conductivity=args.minimum_conductivity,
-            baseline_voltages=baseline_validation,
-            progress_label=f"stage {iteration + 1} validation",
-        )
+        else:
+            current_train = (
+                np.maximum(
+                    train["sigma_baseline"] + current_train,
+                    float(args.minimum_conductivity),
+                )
+                - train["sigma_baseline"]
+            )
+            current_validation = (
+                np.maximum(
+                    validation["sigma_baseline"] + current_validation,
+                    float(args.minimum_conductivity),
+                )
+                - validation["sigma_baseline"]
+            )
+        if iteration == 0 and fixed_first_stage is not None:
+            if args.physics_contract == "absolute":
+                direction_train, diag_train, baseline_train = (
+                    fixed_first_stage.solve_many_absolute(train["V"])
+                )
+                if args.validation_is_train_copy:
+                    direction_validation = direction_train.copy()
+                    diag_validation = copy.deepcopy(diag_train)
+                    baseline_validation = baseline_train.copy()
+                else:
+                    direction_validation, diag_validation, baseline_validation = (
+                        fixed_first_stage.solve_many_absolute(validation["V"])
+                    )
+            else:
+                direction_train, diag_train, baseline_train = fixed_first_stage.solve_many(
+                    train["V"]
+                )
+                if args.validation_is_train_copy:
+                    direction_validation = direction_train.copy()
+                    diag_validation = copy.deepcopy(diag_train)
+                    baseline_validation = baseline_train.copy()
+                else:
+                    direction_validation, diag_validation, baseline_validation = (
+                        fixed_first_stage.solve_many(validation["V"])
+                    )
+        elif args.physics_contract == "absolute":
+            direction_train, diag_train, baseline_train = (
+                parallel_dataset_absolute_lm_directions(
+                    runtime["physics_inv"],
+                    current_train,
+                    train["V"],
+                    regularizer=runtime["mappings"].laplace,
+                    hyper_pvi=cfg.hyper_pvi,
+                    lambda_lm=cfg.lambda_lm,
+                    step_size=cfg.lm_step_size,
+                    minimum_conductivity=args.minimum_conductivity,
+                    progress_label=f"stage {iteration + 1} train absolute",
+                    system_solver=low_rank_solver,
+                )
+            )
+            if args.validation_is_train_copy:
+                direction_validation = direction_train.copy()
+                diag_validation = copy.deepcopy(diag_train)
+                baseline_validation = baseline_train.copy()
+            else:
+                direction_validation, diag_validation, baseline_validation = (
+                    parallel_dataset_absolute_lm_directions(
+                    runtime["physics_inv"],
+                    current_validation,
+                    validation["V"],
+                    regularizer=runtime["mappings"].laplace,
+                    hyper_pvi=cfg.hyper_pvi,
+                    lambda_lm=cfg.lambda_lm,
+                    step_size=cfg.lm_step_size,
+                    minimum_conductivity=args.minimum_conductivity,
+                    progress_label=f"stage {iteration + 1} validation absolute",
+                    system_solver=low_rank_solver,
+                )
+            )
+        else:
+            direction_train, diag_train, baseline_train = parallel_dataset_lm_directions(
+                runtime["physics_inv"],
+                train["sigma_baseline"],
+                current_train,
+                train["V"],
+                regularizer=runtime["mappings"].laplace,
+                hyper_pvi=cfg.hyper_pvi,
+                lambda_lm=cfg.lambda_lm,
+                step_size=cfg.lm_step_size,
+                minimum_conductivity=args.minimum_conductivity,
+                baseline_voltages=baseline_train,
+                progress_label=f"stage {iteration + 1} train",
+                system_solver=low_rank_solver,
+            )
+            if args.validation_is_train_copy:
+                direction_validation = direction_train.copy()
+                diag_validation = copy.deepcopy(diag_train)
+                baseline_validation = baseline_train.copy()
+            else:
+                direction_validation, diag_validation, baseline_validation = (
+                    parallel_dataset_lm_directions(
+                    runtime["physics_inv"],
+                    validation["sigma_baseline"],
+                    current_validation,
+                    validation["V"],
+                    regularizer=runtime["mappings"].laplace,
+                    hyper_pvi=cfg.hyper_pvi,
+                    lambda_lm=cfg.lambda_lm,
+                    step_size=cfg.lm_step_size,
+                    minimum_conductivity=args.minimum_conductivity,
+                    baseline_voltages=baseline_validation,
+                    progress_label=f"stage {iteration + 1} validation",
+                    system_solver=low_rank_solver,
+                )
+            )
         physics_reports.append(
             {
                 "stage": iteration + 1,
@@ -389,22 +735,72 @@ def main() -> None:
             train["sigma"], current_train, direction_train, positions, runtime["edge_index"],
             scale=scale, use_coordinates=args.use_coordinates,
             positive_weight=args.positive_weight,
+            voltage=train["V"] if args.use_voltage_mlp else None,
+            voltage_scale=voltage_scale,
+            reference=(
+                train["sigma_resting"]
+                if args.physics_contract == "absolute"
+                else None
+            ),
         )
         validation_set = _make_dataset(
             validation["sigma"], current_validation, direction_validation,
             positions, runtime["edge_index"], scale=scale,
             use_coordinates=args.use_coordinates, positive_weight=args.positive_weight,
+            voltage=validation["V"] if args.use_voltage_mlp else None,
+            voltage_scale=voltage_scale,
+            reference=(
+                validation["sigma_resting"]
+                if args.physics_contract == "absolute"
+                else None
+            ),
         )
-        train_loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True)
+        temporal_enabled = any(
+            value > 0
+            for value in (
+                args.temporal_delta_weight,
+                args.temporal_correlation_weight,
+                args.temporal_amplitude_weight,
+            )
+        )
+        if temporal_enabled:
+            if args.temporal_group_size <= 1:
+                raise ValueError("temporal losses require --temporal-group-size")
+            if len(train_set) % args.temporal_group_size or len(validation_set) % args.temporal_group_size:
+                raise ValueError("datasets must contain complete ordered temporal groups")
+            loader_batch_size = args.temporal_group_size
+            train_shuffle = False
+        else:
+            loader_batch_size = args.batch_size or cfg.batch_size
+            train_shuffle = True
+        train_loader = DataLoader(
+            train_set,
+            batch_size=loader_batch_size,
+            shuffle=train_shuffle,
+            num_workers=args.loader_workers,
+            pin_memory=device.type == "cuda" and args.loader_workers > 0,
+        )
         validation_loader = DataLoader(
-            validation_set, batch_size=cfg.batch_size, shuffle=False
+            validation_set,
+            batch_size=loader_batch_size,
+            shuffle=False,
+            num_workers=args.loader_workers,
+            pin_memory=device.type == "cuda" and args.loader_workers > 0,
         )
-        model = _model(args.output_mode, cfg.channels, in_channels).to(device)
+        model = _model(
+            args.output_mode,
+            cfg.channels,
+            in_channels,
+            use_voltage_mlp=args.use_voltage_mlp,
+            measurements=int(train["V"].shape[1]),
+            voltage_latent=args.voltage_latent,
+        ).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
         best_state = copy.deepcopy(model.state_dict())
         best_score = float("inf")
         best_epoch = 0
-        patience = cfg.patience
+        patience_limit = cfg.patience if args.patience is None else int(args.patience)
+        patience = patience_limit
         iteration_history: list[dict] = []
         for epoch in range(epochs):
             train_loss = _run_epoch(
@@ -414,6 +810,14 @@ def main() -> None:
                 args.dice_weight,
                 args.hard_background_weight,
                 args.hard_background_fraction,
+                args.balanced_support_loss,
+                args.correlation_weight,
+                args.amplitude_weight,
+                args.relative_amplitude_weight,
+                args.temporal_delta_weight,
+                args.temporal_correlation_weight,
+                args.temporal_amplitude_weight,
+                args.temporal_group_size,
                 optimizer,
             )
             with torch.no_grad():
@@ -424,6 +828,14 @@ def main() -> None:
                     args.dice_weight,
                     args.hard_background_weight,
                     args.hard_background_fraction,
+                    args.balanced_support_loss,
+                    args.correlation_weight,
+                    args.amplitude_weight,
+                    args.relative_amplitude_weight,
+                    args.temporal_delta_weight,
+                    args.temporal_correlation_weight,
+                    args.temporal_amplitude_weight,
+                    args.temporal_group_size,
                 )
             score, score_metrics = _checkpoint_score(
                 model,
@@ -448,7 +860,7 @@ def main() -> None:
                 best_score = score
                 best_epoch = epoch
                 best_state = copy.deepcopy(model.state_dict())
-                patience = cfg.patience
+                patience = patience_limit
             else:
                 patience -= 1
                 if patience <= 0:
@@ -459,6 +871,8 @@ def main() -> None:
         feature_order = ["current", "per_stage_lm_direction"]
         if args.use_coordinates:
             feature_order.extend(["x", "y", "radius"])
+        if args.use_voltage_mlp:
+            feature_order.append("global_voltage_mlp")
         checkpoint = {
             "state_dict": model.cpu().state_dict(),
             "channels": cfg.channels,
@@ -466,6 +880,10 @@ def main() -> None:
             "scale": scale,
             "iteration": iteration,
             "feature_order": feature_order,
+            "use_coordinates": args.use_coordinates,
+            "use_voltage_mlp": args.use_voltage_mlp,
+            "voltage_scale": voltage_scale,
+            "voltage_latent": args.voltage_latent,
             "output_mode": args.output_mode,
             "loss_contract": {
                 "positive_weight": args.positive_weight,
@@ -473,13 +891,29 @@ def main() -> None:
                 "dice_weight": args.dice_weight,
                 "hard_background_weight": args.hard_background_weight,
                 "hard_background_fraction": args.hard_background_fraction,
+                "balanced_support_loss": args.balanced_support_loss,
+                "correlation_weight": args.correlation_weight,
+                "amplitude_weight": args.amplitude_weight,
+                "relative_amplitude_weight": args.relative_amplitude_weight,
+                "dynamic_reference": (
+                    "sigma_resting" if args.physics_contract == "absolute" else None
+                ),
+                "temporal_delta_weight": args.temporal_delta_weight,
+                "temporal_correlation_weight": args.temporal_correlation_weight,
+                "temporal_amplitude_weight": args.temporal_amplitude_weight,
+                "temporal_group_size": args.temporal_group_size,
                 "dice_supervision": "clean synthetic targets only",
             },
-            "physics": "nonlinear differential F/J/LM recomputed at every stage",
+            "physics": (
+                "nonlinear absolute F/J/LM recomputed at every stage"
+                if args.physics_contract == "absolute"
+                else "nonlinear differential F/J/LM recomputed at every stage"
+            ),
             "best_epoch": best_epoch,
             "best_selection_score": best_score,
             "physics_contract": {
                 "baseline_mode": args.baseline_mode,
+                "measurement_contract": args.physics_contract,
                 "baseline_conductivity": args.baseline_conductivity,
                 "hyper_pvi": cfg.hyper_pvi,
                 "lambda_lm": cfg.lambda_lm,
@@ -498,8 +932,12 @@ def main() -> None:
         print(f"saved {checkpoint_path}", flush=True)
 
     report = {
-        "method": "faithful differential PVI-GCNM",
-        "target": "clean synthetic vascular delta conductivity",
+        "method": f"faithful {args.physics_contract} PVI-GCNM",
+        "target": (
+            "true synthetic absolute conductivity"
+            if args.physics_contract == "absolute"
+            else "clean synthetic vascular delta conductivity"
+        ),
         "pvi_images_used_as_labels": False,
         "per_stage_physics_recomputed": True,
         "model_name": args.model_name,
@@ -507,17 +945,33 @@ def main() -> None:
         "validation_samples": int(len(validation["sigma"])),
         "iterations": iterations,
         "epochs_requested": epochs,
+        "patience": cfg.patience if args.patience is None else int(args.patience),
         "scale": scale,
         "output_mode": args.output_mode,
         "use_coordinates": args.use_coordinates,
+        "use_voltage_mlp": args.use_voltage_mlp,
+        "voltage_scale": voltage_scale,
+        "voltage_latent": args.voltage_latent,
+        "batch_size": int(args.batch_size or cfg.batch_size),
+        "loader_workers": int(args.loader_workers),
+        "validation_is_train_copy": bool(args.validation_is_train_copy),
         "positive_weight": args.positive_weight,
         "background_weight": args.background_weight,
         "dice_weight": args.dice_weight,
         "hard_background_weight": args.hard_background_weight,
         "hard_background_fraction": args.hard_background_fraction,
+        "balanced_support_loss": args.balanced_support_loss,
+        "correlation_weight": args.correlation_weight,
+        "amplitude_weight": args.amplitude_weight,
+        "relative_amplitude_weight": args.relative_amplitude_weight,
+        "temporal_delta_weight": args.temporal_delta_weight,
+        "temporal_correlation_weight": args.temporal_correlation_weight,
+        "temporal_amplitude_weight": args.temporal_amplitude_weight,
+        "temporal_group_size": args.temporal_group_size,
         "checkpoint_mode": args.checkpoint_mode,
         "random_seed": seed,
         "baseline_mode": args.baseline_mode,
+        "physics_contract": args.physics_contract,
         "baseline_conductivity": args.baseline_conductivity,
         "physics_stages": physics_reports,
         "artifact_hashes": artifact_hashes,

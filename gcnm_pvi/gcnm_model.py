@@ -88,6 +88,83 @@ class GCNBlock(torch.nn.Module):
         return x
 
 
+class VoltageConditionedGCNBlock(torch.nn.Module):
+    """Prepend a global voltage MLP to an ordinary node-wise GCN.
+
+    The complete differential-voltage vector is encoded once per graph and
+    broadcast to every inverse-mesh element.  This retains the selected GCNM's
+    local physics and coordinate features while giving it the same global
+    voltage context used by the vessel-slot models.
+    """
+
+    def __init__(
+        self,
+        channels,
+        *,
+        node_features=5,
+        measurements=32,
+        voltage_hidden=128,
+        voltage_latent=64,
+        residual_around_proposal=False,
+    ):
+        super().__init__()
+        self.node_features = int(node_features)
+        self.measurements = int(measurements)
+        self.voltage_latent = int(voltage_latent)
+        self.residual_around_proposal = bool(residual_around_proposal)
+        self.voltage_encoder = torch.nn.Sequential(
+            torch.nn.Linear(self.measurements, voltage_hidden),
+            torch.nn.LayerNorm(voltage_hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(voltage_hidden, voltage_hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(voltage_hidden, self.voltage_latent),
+        )
+        self.gcn = GCNBlock(
+            channels,
+            in_channels=self.node_features + self.voltage_latent,
+        )
+        if self.residual_around_proposal:
+            last = self.gcn.conv_layers[-1]
+            torch.nn.init.zeros_(last.lin.weight)
+            if last.bias is not None:
+                torch.nn.init.zeros_(last.bias)
+
+    def forward(self, data):
+        batch = getattr(data, "batch", None)
+        if batch is None:
+            batch = torch.zeros(
+                data.x.shape[0], dtype=torch.long, device=data.x.device
+            )
+        voltage = data.voltage
+        if voltage.ndim == 1:
+            voltage = voltage[None, :]
+        model_dtype = self.voltage_encoder[0].weight.dtype
+        voltage = voltage.to(dtype=model_dtype)
+        encoded = self.voltage_encoder(voltage)
+        original = data.x
+        data.x = torch.cat((original.to(dtype=model_dtype), encoded[batch]), dim=1)
+        try:
+            prediction = self.gcn(data)
+            if self.residual_around_proposal:
+                prediction = prediction + original[:, 0:1] + original[:, 1:2]
+            return prediction
+        finally:
+            data.x = original
+
+
+class PositiveOutput(torch.nn.Module):
+    """Map an unconstrained graph prediction to positive conductivity."""
+
+    def __init__(self, model: torch.nn.Module, minimum: float = 1e-6):
+        super().__init__()
+        self.model = model
+        self.minimum = float(minimum)
+
+    def forward(self, data):
+        return self.minimum + F.softplus(self.model(data))
+
+
 class ResidualGCNBlock(GCNBlock):
     """Predict a correction to the Newton feature stored in channel one."""
 

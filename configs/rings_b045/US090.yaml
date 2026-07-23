@@ -1,0 +1,31 @@
+pvi_solver_root: ../../../Peripheral-Vascular-Impedance-Imaging/python_port/pvi_solver
+mesh_fwd_h5: ../../data/ring_meshes/collections/b045/US090/ring_US090_fwd.h5
+mesh_inv_h5: ../../data/ring_meshes/collections/b045/US090/ring_US090_inv.h5
+mappings_h5: ../../data/ring_meshes/collections/b045/US090/ring_US090_mappings_40.h5
+num_elecs: 8
+stim_current: -0.01
+stim_pattern:
+- 0
+- 3
+meas_pattern:
+- 0
+- 2
+img_size: 40
+imaging_mode: differential
+lambda_lm: 0.0
+hyper_pvi: 0.0005
+use_laplace: true
+connectivity: node
+iterations: 2
+channels:
+- 64
+- 64
+- 64
+learning_rate: 0.001
+batch_size: 16
+max_epochs: 150
+patience: 15
+shared_model: false
+model_name: gcnm_b045_US090
+models_dir: models/subject006_anatomical
+data_dir: data/subject006_anatomical_results

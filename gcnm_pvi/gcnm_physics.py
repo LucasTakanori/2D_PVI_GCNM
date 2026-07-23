@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import linalg
 
 from gcnm_pvi.paths import ensure_pvi_solver_on_path
 
@@ -19,15 +20,112 @@ class PviPhysics:
         self.num_meas = elec_configs.num_meas_total
         self.num_elems = len(mesh.elems)
         self.rtr = rtr
+        self._dyad_cache: np.ndarray | None = None
+        self._prepare_forward_cache()
 
         v_hom = self.solve(np.ones(self.num_elems))
         self._w = 1.0 / np.maximum(np.abs(v_hom), 1e-12)
 
+    def _prepare_forward_cache(self) -> None:
+        """Cache every FEM term that does not depend on conductivity.
+
+        The upstream Python port rebuilt simplex dyads, complete-electrode
+        blocks, stimulation matrices, and scatter indices for every frame and
+        factorized the same stiffness matrix separately for direct and
+        reciprocal fields.  This cache changes only execution order: the FEM
+        equations and float64 inputs are unchanged.
+        """
+
+        prototype = PviForward(mesh=self.mesh, elec_configs=self.elec_configs)
+        nodes = np.asarray(self.mesh.nodes, dtype=np.float64)
+        elements = np.asarray(self.mesh.elems, dtype=np.int64)
+        num_nodes = len(nodes)
+        num_elecs = len(self.mesh.elecs)
+        self._dyad_cache = prototype._simpdyad(nodes, elements)
+        dyads_by_element = np.moveaxis(self._dyad_cache, 2, 0)
+        row_nodes = np.repeat(elements[:, :, None], elements.shape[1], axis=2)
+        col_nodes = np.repeat(elements[:, None, :], elements.shape[1], axis=1)
+        self._core_flat_indices = (
+            row_nodes * num_nodes + col_nodes
+        ).reshape(-1)
+        self._core_dyads = dyads_by_element.reshape(len(elements), -1)
+
+        ae, aq, ad = prototype._make_matrix_cem(self.mesh)
+        constant = np.block([[ae, aq], [aq.T, ad]]).astype(np.float64, copy=False)
+        ground = int(self.mesh.elecs[0].nodes[0])
+        constant[:, ground] = 0.0
+        constant[ground, :] = 0.0
+        constant[ground, ground] = 1.0
+        self._constant_stiffness = constant
+        self._num_nodes = num_nodes
+        self._num_elecs = num_elecs
+        self._ground_node = ground
+
+        zero_nodes = np.zeros((num_nodes, num_elecs), dtype=np.float64)
+        current = float(self.elec_configs.stim_config.current)
+        direct = np.vstack(
+            (zero_nodes, np.asarray(self.elec_configs.stim_config.matrix, dtype=float))
+        ) * current
+        reciprocal = np.vstack(
+            (zero_nodes, np.asarray(self.elec_configs.meas_config.matrix.T, dtype=float))
+        ) * current
+        direct[ground, :] = 0.0
+        reciprocal[ground, :] = 0.0
+        self._combined_rhs = np.column_stack((direct, reciprocal))
+        self._measurement_extractor = np.asarray(
+            self.elec_configs.potential_config.extractor, dtype=np.float64
+        )
+
     def _forward(self, sigma: np.ndarray) -> PviForward:
-        self.mesh.elems_data = np.asarray(sigma, dtype=np.float64).ravel()
+        conductivity = np.asarray(sigma, dtype=np.float64).ravel()
+        if len(conductivity) != self.num_elems:
+            raise ValueError(
+                f"conductivity has {len(conductivity)} elements, expected {self.num_elems}"
+            )
+        self.mesh.elems_data = conductivity
         fwd = PviForward(mesh=self.mesh, elec_configs=self.elec_configs)
-        fwd.make()
-        fwd.solve()
+        core_values = (conductivity[:, None] * self._core_dyads).reshape(-1)
+        core = np.bincount(
+            self._core_flat_indices,
+            weights=core_values,
+            minlength=self._num_nodes * self._num_nodes,
+        ).reshape(self._num_nodes, self._num_nodes)
+        stiffness = self._constant_stiffness.copy()
+        stiffness[: self._num_nodes, : self._num_nodes] += core
+        # Ground entries in the cached constant matrix must dominate any core
+        # contributions assembled at the grounded node.
+        stiffness[:, self._ground_node] = 0.0
+        stiffness[self._ground_node, :] = 0.0
+        stiffness[self._ground_node, self._ground_node] = 1.0
+        solutions = linalg.solve(
+            stiffness,
+            self._combined_rhs,
+            assume_a="gen",
+            check_finite=False,
+            overwrite_a=True,
+        )
+        direct = solutions[:, : self._num_elecs]
+        reciprocal = solutions[:, self._num_elecs :]
+        voltage = direct[: self._num_nodes]
+        voltage_reci = reciprocal[: self._num_nodes]
+        voltage_elecs = direct[self._num_nodes :]
+        per_stim = self.elec_configs.num_meas_per_stim
+        measured = np.empty((self.num_meas, 1), dtype=np.float64)
+        for stimulus in range(self._num_elecs):
+            rows = np.arange(per_stim) + per_stim * stimulus
+            measured[rows, 0] = (
+                self._measurement_extractor[stimulus]
+                @ voltage_elecs[:, stimulus]
+            )
+        fwd.stim_current = float(self.elec_configs.stim_config.current)
+        fwd.run_reci = True
+        fwd.has_results = True
+        fwd.results = fwd.results_class(
+            voltage=voltage,
+            voltage_reci=voltage_reci,
+            voltage_elecs=voltage_elecs,
+            vmeas=measured,
+        )
         return fwd
 
     def solve(self, sigma: np.ndarray) -> np.ndarray:
@@ -36,8 +134,39 @@ class PviPhysics:
     def forward_and_jacobian(self, sigma: np.ndarray):
         fwd = self._forward(sigma)
         V = fwd.results.vmeas.ravel()
-        J = fwd.compute_jacobian()
+        J = self.jacobian_from_forward(fwd)
         return V, J
+
+    def jacobian_from_forward(self, forward: PviForward) -> np.ndarray:
+        """Vectorized equivalent of ``PviForward.compute_jacobian``.
+
+        Simplex geometry depends only on the mesh, so it is cached once per
+        physics object.  The original nested Python element loop is expressed
+        as one batched contraction without changing the reciprocity formula.
+        """
+        elements = np.asarray(self.mesh.elems, dtype=np.int64)
+        if self._dyad_cache is None:
+            self._dyad_cache = forward._simpdyad(self.mesh.nodes, elements)
+        voltage = np.asarray(forward.results.voltage)[: len(self.mesh.nodes), :]
+        reciprocal = np.asarray(forward.results.voltage_reci)[: len(self.mesh.nodes), :]
+        pair_index = self.elec_configs.pair_idx
+        per_stim = self.elec_configs.num_meas_per_stim
+        jacobian = np.empty((self.num_meas, self.num_elems), dtype=np.float64)
+        reciprocal_elements = reciprocal[elements]
+        for stimulus in range(len(self.mesh.elecs)):
+            selected = pair_index[:, stimulus].astype(bool)
+            drive = voltage[elements, stimulus]
+            measure = reciprocal_elements[:, :, selected]
+            values = np.einsum(
+                "ki,ijk,kjm->km",
+                drive,
+                self._dyad_cache,
+                measure,
+                optimize=True,
+            )
+            rows = np.arange(per_stim) + per_stim * stimulus
+            jacobian[rows, :] = values.T
+        return -jacobian / float(forward.stim_current)
 
     def lm_update(
         self,
@@ -94,7 +223,7 @@ class PviDifferentialPhysics(PviPhysics):
         self.V_ref = V1.copy()
         self.V_init = V1.copy()
         self.dV_alpha = vref - self.V_ref
-        self._J0 = F1.compute_jacobian()
+        self._J0 = self.jacobian_from_forward(F1)
         self._fixed_linear_cache.clear()
 
     def differential_residual(self, vmeas_t: np.ndarray) -> np.ndarray:

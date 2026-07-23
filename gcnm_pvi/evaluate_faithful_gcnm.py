@@ -15,10 +15,10 @@ import torch
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
 from gcnm_pvi.iterative_physics import (
-    dataset_lm_directions,
-    dataset_voltage_residual_rms,
     diagnostics_summary,
     iterative_lm_reconstruction,
+    parallel_dataset_lm_directions,
+    parallel_dataset_voltage_residual_rms,
 )
 from gcnm_pvi.runtime import build_runtime
 from gcnm_pvi.train_faithful_gcnm import _make_dataset, _model, _predict
@@ -58,6 +58,10 @@ def _metrics(prediction: np.ndarray, truth: np.ndarray, mappings) -> dict[str, f
     support = np.abs(truth) > 1e-8
     background = ~support
     element_error = prediction - truth
+    truth_rms = max(float(np.sqrt(np.mean(truth**2))), 1e-12)
+    prediction_rms = float(np.sqrt(np.mean(prediction**2)))
+    truth_step_rms = max(float(np.sqrt(np.mean(np.diff(truth, axis=0) ** 2))), 1e-12)
+    prediction_step_rms = float(np.sqrt(np.mean(np.diff(prediction, axis=0) ** 2)))
     element_correlations = np.asarray(
         [_correlation(pred, target) for pred, target in zip(prediction, truth)]
     )
@@ -71,7 +75,14 @@ def _metrics(prediction: np.ndarray, truth: np.ndarray, mappings) -> dict[str, f
     )
     return {
         "element_rmse": float(np.sqrt(np.mean(element_error**2))),
+        "element_nrmse": float(np.sqrt(np.mean(element_error**2))) / truth_rms,
         "element_mae": float(np.mean(np.abs(element_error))),
+        "prediction_rms": prediction_rms,
+        "truth_rms": truth_rms,
+        "prediction_to_truth_rms": prediction_rms / truth_rms,
+        "frame_difference_rms": prediction_step_rms,
+        "truth_frame_difference_rms": truth_step_rms,
+        "frame_difference_rms_ratio": prediction_step_rms / truth_step_rms,
         "element_correlation": _correlation(prediction, truth),
         "element_correlation_per_sample_mean": float(np.nanmean(element_correlations)),
         "element_correlation_per_sample_median": float(np.nanmedian(element_correlations)),
@@ -84,6 +95,11 @@ def _metrics(prediction: np.ndarray, truth: np.ndarray, mappings) -> dict[str, f
         "image_correlation_per_sample_mean": float(np.nanmean(image_correlations)),
         "image_correlation_per_sample_median": float(np.nanmedian(image_correlations)),
         "localization_dice_at_true_volume": _dice(prediction, truth),
+        "support_sign_accuracy": (
+            float(np.mean(np.sign(prediction[support]) == np.sign(truth[support])))
+            if np.any(support)
+            else float("nan")
+        ),
         "background_rms": (
             float(np.sqrt(np.mean(prediction[background] ** 2)))
             if np.any(background)
@@ -92,6 +108,72 @@ def _metrics(prediction: np.ndarray, truth: np.ndarray, mappings) -> dict[str, f
         "vessel_mean": (
             float(np.mean(prediction[support])) if np.any(support) else float("nan")
         ),
+    }
+
+
+def _newton_relative(
+    candidate: dict[str, float],
+    newton: dict[str, float],
+    *,
+    candidate_voltage_residual: float,
+    newton_voltage_residual: float,
+) -> dict:
+    """Describe practical improvement over PVI one-step Newton.
+
+    Perfect synthetic reconstruction is not a hard gate.  The learned image is
+    considered useful when it remains dynamic/non-degenerate and improves a
+    meaningful subset of morphology, amplitude, localization, sign, and
+    forward-consistency measures over the production baseline.
+    """
+
+    comparisons = {
+        "lower_element_nrmse": candidate["element_nrmse"] < newton["element_nrmse"],
+        "higher_image_correlation": candidate["image_correlation"] > newton["image_correlation"],
+        "higher_localization_dice": candidate["localization_dice_at_true_volume"]
+        > newton["localization_dice_at_true_volume"],
+        "higher_support_sign_accuracy": candidate["support_sign_accuracy"]
+        > newton["support_sign_accuracy"],
+        "closer_rms_amplitude": abs(candidate["prediction_to_truth_rms"] - 1.0)
+        < abs(newton["prediction_to_truth_rms"] - 1.0),
+        "closer_frame_dynamics": abs(candidate["frame_difference_rms_ratio"] - 1.0)
+        < abs(newton["frame_difference_rms_ratio"] - 1.0),
+        "lower_nonlinear_voltage_residual": candidate_voltage_residual
+        < newton_voltage_residual,
+    }
+    finite = all(np.isfinite(value) for value in candidate.values())
+    nondegenerate = (
+        0.05 <= candidate["prediction_to_truth_rms"] <= 20.0
+        and 0.05 <= candidate["frame_difference_rms_ratio"] <= 20.0
+    )
+    improvements = int(sum(comparisons.values()))
+    if not finite or not nondegenerate:
+        classification = "failed_nonfinite_or_blank_static_explosive_sanity_gate"
+    elif improvements >= 4:
+        classification = "promising_relative_to_production_newton"
+    else:
+        classification = "exploratory_not_yet_better_than_production_newton"
+    return {
+        "classification": classification,
+        "improvements": improvements,
+        "comparisons": comparisons,
+        "candidate_minus_newton": {
+            "element_nrmse": candidate["element_nrmse"] - newton["element_nrmse"],
+            "image_correlation": candidate["image_correlation"] - newton["image_correlation"],
+            "localization_dice": candidate["localization_dice_at_true_volume"]
+            - newton["localization_dice_at_true_volume"],
+            "support_sign_accuracy": candidate["support_sign_accuracy"]
+            - newton["support_sign_accuracy"],
+            "prediction_to_truth_rms": candidate["prediction_to_truth_rms"]
+            - newton["prediction_to_truth_rms"],
+            "frame_difference_rms_ratio": candidate["frame_difference_rms_ratio"]
+            - newton["frame_difference_rms_ratio"],
+            "nonlinear_voltage_residual_rms": candidate_voltage_residual
+            - newton_voltage_residual,
+        },
+        "sanity": {
+            "all_metrics_finite": finite,
+            "nonblank_nonexplosive_rms": nondegenerate,
+        },
     }
 
 
@@ -145,7 +227,11 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=None)
     parser.add_argument("--save-examples", type=int, default=8)
     parser.add_argument("--max-test", type=int, default=None)
-    parser.add_argument("--target-kind", choices=["clean", "pvi_pseudo"], default="clean")
+    parser.add_argument(
+        "--target-kind",
+        choices=["clean", "pvi_pseudo", "real_subject006"],
+        default="clean",
+    )
     parser.add_argument(
         "--baseline-mode",
         choices=["auto", "saved", "homogeneous"],
@@ -203,7 +289,7 @@ def main() -> None:
     voltage_sign = (
         float(args.physics_voltage_sign)
         if args.physics_voltage_sign is not None
-        else -1.0 if args.target_kind == "pvi_pseudo" else 1.0
+        else -1.0 if args.target_kind in {"pvi_pseudo", "real_subject006"} else 1.0
     )
     measured = voltage_sign * measured_saved
     old_newton = (
@@ -239,7 +325,7 @@ def main() -> None:
         current = (
             np.maximum(baselines + current, float(args.minimum_conductivity)) - baselines
         )
-        direction, diagnostics, baseline_voltages = dataset_lm_directions(
+        direction, diagnostics, baseline_voltages = parallel_dataset_lm_directions(
             runtime["physics_inv"],
             baselines,
             current,
@@ -273,7 +359,13 @@ def main() -> None:
                     f"checkpoint physics contract {key}={contract[key]} does not "
                     f"match evaluation value {expected}"
                 )
-        use_coordinates = len(checkpoint["feature_order"]) == 5
+        use_coordinates = bool(
+            checkpoint.get(
+                "use_coordinates",
+                all(name in checkpoint["feature_order"] for name in ("x", "y", "radius")),
+            )
+        )
+        use_voltage_mlp = bool(checkpoint.get("use_voltage_mlp", False))
         dataset = _make_dataset(
             truth,
             current,
@@ -283,15 +375,20 @@ def main() -> None:
             scale=float(checkpoint["scale"]),
             use_coordinates=use_coordinates,
             positive_weight=0.0,
+            voltage=measured if use_voltage_mlp else None,
+            voltage_scale=float(checkpoint.get("voltage_scale", 1.0)),
         )
         model = _model(
             checkpoint["output_mode"],
             checkpoint["channels"],
             int(checkpoint["in_channels"]),
+            use_voltage_mlp=use_voltage_mlp,
+            measurements=int(measured.shape[1]),
+            voltage_latent=int(checkpoint.get("voltage_latent", 64)),
         ).to(device)
         model.load_state_dict(checkpoint["state_dict"])
         current = _predict(model, dataset, float(checkpoint["scale"]))
-        residuals, baseline_voltages, final_clips = dataset_voltage_residual_rms(
+        residuals, baseline_voltages, final_clips = parallel_dataset_voltage_residual_rms(
             runtime["physics_inv"],
             baselines,
             current,
@@ -326,7 +423,7 @@ def main() -> None:
     lm_physics = []
     lm_baselines = None
     for iteration in range(len(lm_stages)):
-        residuals, lm_baselines, clips = dataset_voltage_residual_rms(
+        residuals, lm_baselines, clips = parallel_dataset_voltage_residual_rms(
             runtime["physics_inv"],
             baselines,
             lm_stages[iteration],
@@ -341,19 +438,59 @@ def main() -> None:
         lm_voltage.append(residuals)
 
     gcnm_stages_array = np.stack(gcnm_stages)
+    real_without_truth = args.target_kind == "real_subject006"
+    saved_newton_metrics = None
+    saved_newton_voltage_residual = None
+    saved_newton_clipped_elements = None
+    if old_newton is not None and not real_without_truth:
+        saved_newton_metrics = _metrics(old_newton, truth, runtime["mappings"])
+        newton_residuals, _newton_baselines, saved_newton_clipped_elements = (
+            parallel_dataset_voltage_residual_rms(
+                runtime["physics_inv"],
+                baselines,
+                old_newton,
+                measured,
+                minimum_conductivity=args.minimum_conductivity,
+            )
+        )
+        saved_newton_voltage_residual = float(np.mean(newton_residuals))
+    iterative_records = []
+    for index, values in enumerate(lm_stages):
+        record = {"stage": index + 1, "physics": lm_physics[index]}
+        if not real_without_truth:
+            record["metrics"] = _metrics(values, truth, runtime["mappings"])
+        iterative_records.append(record)
+    learned_records = []
+    for index, values in enumerate(gcnm_stages_array):
+        record = {"stage": index + 1, "physics": gcnm_physics[index]}
+        if not real_without_truth:
+            record["metrics"] = _metrics(values, truth, runtime["mappings"])
+            if (
+                saved_newton_metrics is not None
+                and saved_newton_voltage_residual is not None
+            ):
+                record["relative_to_saved_one_step_newton"] = _newton_relative(
+                    record["metrics"],
+                    saved_newton_metrics,
+                    candidate_voltage_residual=float(np.mean(gcnm_voltage[index])),
+                    newton_voltage_residual=saved_newton_voltage_residual,
+                )
+        learned_records.append(record)
     report = {
         "method": "faithful differential PVI-GCNM with iterative-LM control",
         "target_kind": args.target_kind,
         "target_warning": (
             "clean synthetic conductivity ground truth"
             if args.target_kind == "clean"
+            else "no anatomical ground truth; PVI reconstruction is display-only"
+            if real_without_truth
             else "PVI production Newton pseudo-label; not anatomical ground truth"
         ),
         "samples": int(len(truth)),
         "per_stage_physics_recomputed": True,
         "iterative_lm_control_executed": not args.skip_lm_control,
         "baseline_source": (
-            "saved per-sample anatomical baseline (oracle anatomy)"
+            "anatomical baseline supplied by the evaluation pack"
             if baseline_mode == "saved"
             else f"homogeneous {args.baseline_conductivity} S/m inference baseline"
         ),
@@ -362,31 +499,42 @@ def main() -> None:
         "saved_to_physics_voltage_sign": voltage_sign,
         "voltage_sign_reason": (
             "real PVI pack follows the MATLAB display convention; physical conductivity inversion uses the opposite sign"
-            if args.target_kind == "pvi_pseudo" and voltage_sign == -1.0
+            if args.target_kind in {"pvi_pseudo", "real_subject006"} and voltage_sign == -1.0
             else "saved voltage already follows the physical synthetic forward-model convention"
         ),
         "saved_newton": (
-            _metrics(old_newton, truth, runtime["mappings"])
-            if old_newton is not None
+            {
+                "metrics": saved_newton_metrics,
+                "nonlinear_voltage_residual_rms_mean": saved_newton_voltage_residual,
+                "clipped_elements_total": int(saved_newton_clipped_elements),
+                "role": "production PVI one-step Newton baseline; never a label",
+            }
+            if saved_newton_metrics is not None
             else None
         ),
-        "iterative_lm": [
-            {
-                "stage": index + 1,
-                "metrics": _metrics(values, truth, runtime["mappings"]),
-                "physics": lm_physics[index],
-            }
-            for index, values in enumerate(lm_stages)
-        ],
-        "faithful_gcnm": [
-            {
-                "stage": index + 1,
-                "metrics": _metrics(values, truth, runtime["mappings"]),
-                "physics": gcnm_physics[index],
-            }
-            for index, values in enumerate(gcnm_stages_array)
-        ],
+        "iterative_lm": iterative_records,
+        "faithful_gcnm": learned_records,
+        "architecture_gate_policy": {
+            "objective": (
+                "rich signed dynamic representations that improve materially on "
+                "production one-step Newton; perfect synthetic recovery is not required"
+            ),
+            "hard_sanity_only": (
+                "finite output and nonblank/nonstatic/nonexplosive RMS ratios in [0.05, 20]"
+            ),
+            "promising_rule": (
+                "pass sanity and improve at least four of seven Newton-relative metrics"
+            ),
+            "absolute_correlation_or_nrmse_threshold_is_hard_gate": False,
+        },
     }
+    if real_without_truth:
+        report["metrics_policy"] = (
+            "No image correlation, Dice, RMSE, or background RMS is computed "
+            "against PVI because it is not anatomical ground truth."
+        )
+        report["primary_metric"] = "nonlinear differential voltage residual RMS"
+        report["pvi_reconstruction_role"] = "display-only pseudo-reference"
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"

@@ -103,7 +103,7 @@ def production_reconstruction_matrix(
     )
     sigma0 = np.full(physics.num_elems, float(sigma_init), dtype=np.float64)
     forward = physics._forward(sigma0)
-    jacobian = np.asarray(forward.compute_jacobian(), dtype=np.float64)
+    jacobian = np.asarray(physics.jacobian_from_forward(forward), dtype=np.float64)
     system = jacobian.T @ jacobian + float(hyper_pvi) ** 2 * reg
     d1 = linalg.solve(
         system,
