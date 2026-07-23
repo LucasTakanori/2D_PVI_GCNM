@@ -13,6 +13,23 @@ checkpoints/
 runs/
 wandb/
 lightning_logs/
+failed_runs/
+gcnm_parquet/
+
+# Local experiment plans, status ledgers, dashboards, and generated reports
+/DATASET_REGENERATION_S1_S2_V2.md
+/DIFFERENTIAL_GCNM_PILOT_PLAN.md
+/FULL_GCNM_91_SUBJECT_ROLLOUT_PLAN.md
+/GCNM_BP_REPRESENTATIONS.md
+/GCNM_MESH_SUBJECT_MODEL_PARQUET_INVENTORY.md
+/POST_EXPORT_GPU_EXPORT_OPTIMIZATION_PLAN.md
+/PVI_GCNM_HP_LP_PILOT_PLAN.md
+/PVI_GCNM_MODEL_VISUAL_CATALOG.html
+/PVI_GCNM_MODEL_VISUAL_CATALOG.md
+/TRAINED_MODELS_AND_RESULTS.md
+/reports/*
+!/reports/gcnm_pvi_latex/
+!/reports/gcnm_pvi_latex/**
 
 # Python environments and caches
 .venv/
