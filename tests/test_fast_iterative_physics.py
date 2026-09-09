@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from scipy import linalg, sparse
 
 from gcnm_pvi.iterative_physics import (
@@ -148,6 +149,7 @@ def test_parallel_low_rank_directions_preserve_serial_order_and_values(monkeypat
     assert parallel[1] == serial[1]
 
 
+@pytest.mark.fork_isolation
 def test_process_low_rank_directions_preserve_serial_order_and_values(monkeypatch):
     monkeypatch.setenv("GCNM_PHYSICS_EXECUTOR", "process")
     monkeypatch.delenv("GCNM_PHYSICS_WORKERS", raising=False)

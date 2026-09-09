@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pvi-gcnm"
+version = "0.2.0"
+description = "Graph-convolutional Newton reconstruction for two-dimensional PVI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy<2",
+    "scipy",
+    "h5py",
+    "PyYAML",
+    "shapely",
+    "matplotlib",
+    "torch",
+    "torch-geometric",
+]
+
+[project.optional-dependencies]
+bp-bridge = ["pandas", "pyarrow"]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gcnm_pvi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = [
+    "integration: requires the external PVI solver, mesh files, or generated data",
+    "gpu: requires a CUDA device",
+    "fork_isolation: uses POSIX fork and must run after threaded numerical tests",
+]
+norecursedirs = [
+    ".git",
+    ".pytest_cache",
+    "artifacts",
+    "data",
+    "exports",
+    "failed_runs",
+    "figures",
+    "gcnm_parquet",
+    "logs",
+    "models",
+    "reports",
+]

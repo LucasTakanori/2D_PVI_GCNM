@@ -14,6 +14,11 @@ import torch
 
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
+from gcnm_pvi.coordinate_runtime import (
+    build_coordinate_model as _model,
+    make_coordinate_graphs as _make_dataset,
+    predict_coordinate_graphs as _predict,
+)
 from gcnm_pvi.dual_mesh_physics import ProjectedFineMeshPhysics
 from gcnm_pvi.iterative_physics import (
     diagnostics_summary,
@@ -22,7 +27,6 @@ from gcnm_pvi.iterative_physics import (
     parallel_dataset_voltage_residual_rms,
 )
 from gcnm_pvi.runtime import build_runtime
-from gcnm_pvi.train_faithful_gcnm import _make_dataset, _model, _predict
 
 
 def _sha256(path: Path) -> str:

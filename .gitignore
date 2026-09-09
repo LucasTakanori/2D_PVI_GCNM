@@ -15,6 +15,13 @@ wandb/
 lightning_logs/
 failed_runs/
 gcnm_parquet/
+exports/
+
+# Generated figure products stay on project storage.  Keep only the small
+# documentation and plotting source under version control.
+figures/*
+!figures/README.md
+!figures/*.py
 
 # Local experiment plans, status ledgers, dashboards, and generated reports
 /DATASET_REGENERATION_S1_S2_V2.md
@@ -34,6 +41,9 @@ gcnm_parquet/
 # Python environments and caches
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/

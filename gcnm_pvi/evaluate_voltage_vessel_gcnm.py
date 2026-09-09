@@ -28,10 +28,10 @@ from gcnm_pvi.iterative_physics import (
     dataset_voltage_residual_rms,
 )
 from gcnm_pvi.runtime import build_runtime
-from gcnm_pvi.train_voltage_vessel_gcnm import (
-    _graphs,
-    _predict,
-    _predict_with_parameters,
+from gcnm_pvi.vessel_runtime import (
+    make_vessel_graphs as _graphs,
+    predict_vessel_graphs as _predict,
+    predict_vessel_graphs_with_parameters as _predict_with_parameters,
 )
 from gcnm_pvi.voltage_vessel_model import (
     SpatialAttentionVesselLocalizer,

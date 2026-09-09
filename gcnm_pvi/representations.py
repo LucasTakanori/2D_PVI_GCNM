@@ -13,6 +13,11 @@ import torch
 
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
+from gcnm_pvi.coordinate_runtime import (
+    build_coordinate_model,
+    make_coordinate_graphs,
+    predict_coordinate_graphs,
+)
 from gcnm_pvi.iterative_physics import (
     FixedZeroCurrentLMSolver,
     LowRankRegularizedSolver,
@@ -22,6 +27,10 @@ from gcnm_pvi.iterative_physics import (
 from gcnm_pvi.runtime import build_runtime
 from gcnm_pvi.mesh_registry import sha256_file
 from gcnm_pvi.dual_mesh_physics import ProjectedFineMeshPhysics
+from gcnm_pvi.vessel_runtime import (
+    make_vessel_graphs,
+    predict_vessel_graphs_with_parameters,
+)
 
 
 def _validate_physics_hashes(
@@ -201,8 +210,6 @@ class CoordinateReconstructor:
         physics_mesh_mode: str = "coarse",
         allow_config_hash_mismatch: bool = False,
     ) -> None:
-        from gcnm_pvi.train_faithful_gcnm import _model
-
         self.config_path = Path(config)
         self.cfg = GcnmConfig.from_yaml(config)
         if physics_mesh_mode not in {"coarse", "projected_fine"}:
@@ -236,7 +243,7 @@ class CoordinateReconstructor:
                 float(contract.get("baseline_conductivity", np.nan)), 0.7
             ):
                 raise ValueError("coordinate checkpoint does not use the 0.7 S/m homogeneous baseline")
-            model = _model(
+            model = build_coordinate_model(
                 checkpoint["output_mode"],
                 checkpoint["channels"],
                 int(checkpoint["in_channels"]),
@@ -281,8 +288,6 @@ class CoordinateReconstructor:
         return self.runtime["mappings"]
 
     def reconstruct(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-        from gcnm_pvi.train_faithful_gcnm import _make_dataset
-
         measured = np.asarray(voltage, dtype=np.float64)
         elements = self.mappings.num_elements
         truth = np.zeros((len(measured), elements), dtype=np.float64)
@@ -290,7 +295,7 @@ class CoordinateReconstructor:
         zero = np.zeros_like(truth)
         direction_1, _, baseline_voltages = self.fixed_stage.solve_many(measured)
         checkpoint_1, checkpoint_2 = self.checkpoints
-        graphs_1 = _make_dataset(
+        graphs_1 = make_coordinate_graphs(
             truth, zero, direction_1, self.positions, self.runtime["edge_index"],
             scale=float(checkpoint_1["scale"]), use_coordinates=True, positive_weight=0.0,
             voltage=measured if checkpoint_1.get("use_voltage_mlp", False) else None,
@@ -309,7 +314,7 @@ class CoordinateReconstructor:
             baseline_voltages=baseline_voltages,
             system_solver=self.nonlinear_solver,
         )
-        graphs_2 = _make_dataset(
+        graphs_2 = make_coordinate_graphs(
             truth, stage_1, direction_2, self.positions, self.runtime["edge_index"],
             scale=float(checkpoint_2["scale"]), use_coordinates=True, positive_weight=0.0,
             voltage=measured if checkpoint_2.get("use_voltage_mlp", False) else None,
@@ -345,8 +350,6 @@ class CoordinateReconstructor:
 
     def reconstruct_reference(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
         """Original dense, frame-wise implementation used for parity tests."""
-        from gcnm_pvi.train_faithful_gcnm import _make_dataset, _predict
-
         measured = np.asarray(voltage, dtype=np.float64)
         elements = self.mappings.num_elements
         truth = np.zeros((len(measured), elements), dtype=np.float64)
@@ -363,13 +366,15 @@ class CoordinateReconstructor:
                 minimum_conductivity=float(checkpoint["physics_contract"].get("minimum_conductivity", 1e-4)),
                 baseline_voltages=baseline_voltages,
             )
-            graphs = _make_dataset(
+            graphs = make_coordinate_graphs(
                 truth, current, direction, self.positions, self.runtime["edge_index"],
                 scale=float(checkpoint["scale"]), use_coordinates=True, positive_weight=0.0,
                 voltage=measured if checkpoint.get("use_voltage_mlp", False) else None,
                 voltage_scale=float(checkpoint.get("voltage_scale", 1.0)),
             )
-            current = _predict(model, graphs, float(checkpoint["scale"]))
+            current = predict_coordinate_graphs(
+                model, graphs, float(checkpoint["scale"])
+            )
             stage_residual, baseline_voltages, _ = dataset_voltage_residual_rms(
                 self.stage_physics, baseline, current, measured,
                 minimum_conductivity=float(checkpoint["physics_contract"].get("minimum_conductivity", 1e-4)),
@@ -470,8 +475,6 @@ class GlobalVoltageVesselSlotReconstructor:
         voltage: np.ndarray,
         voltage_template: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
-        from gcnm_pvi.train_voltage_vessel_gcnm import _graphs
-
         total_started = time.perf_counter()
         measured = np.asarray(voltage, dtype=np.float64)
         if voltage_template is None:
@@ -490,7 +493,7 @@ class GlobalVoltageVesselSlotReconstructor:
         context_direction, _, _ = self.fixed_stage.solve_many(templates)
         fixed_seconds = time.perf_counter() - started
         started = time.perf_counter()
-        stage_1_graphs = _graphs(
+        stage_1_graphs = make_vessel_graphs(
             zero,
             zero,
             direction_1,
@@ -530,7 +533,7 @@ class GlobalVoltageVesselSlotReconstructor:
         )
         nonlinear_physics_seconds = time.perf_counter() - started
         started = time.perf_counter()
-        stage_2_graphs = _graphs(
+        stage_2_graphs = make_vessel_graphs(
             zero,
             stage_1,
             direction_2,
@@ -671,8 +674,6 @@ class DiffusionSlotReconstructor:
         return self.runtime["mappings"]
 
     def reconstruct(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-        from gcnm_pvi.train_voltage_vessel_gcnm import _graphs
-
         measured = np.asarray(voltage, dtype=np.float64)
         count, elements = len(measured), self.mappings.num_elements
         baseline = np.broadcast_to(self.baseline[None, :], (count, elements)).copy()
@@ -680,7 +681,7 @@ class DiffusionSlotReconstructor:
         zero = np.zeros_like(baseline)
         dummy = np.zeros((count, 2, 8), dtype=np.float32)
         direction_1, _, baseline_voltages = self.fixed_stage.solve_many(measured)
-        graphs_1 = _graphs(
+        graphs_1 = make_vessel_graphs(
             zero, zero, direction_1, measured, dummy, self.positions, self.runtime["edge_index"],
             conductivity_scale=float(self.contract["conductivity_scale"]),
             voltage_scale=float(self.contract["voltage_scale"]), tissue_labels=labels,
@@ -698,7 +699,7 @@ class DiffusionSlotReconstructor:
             baseline_voltages=baseline_voltages,
             system_solver=None,
         )
-        graphs_2 = _graphs(
+        graphs_2 = make_vessel_graphs(
             zero, stage_1, direction_2, measured, dummy, self.positions, self.runtime["edge_index"],
             conductivity_scale=float(self.contract["conductivity_scale"]),
             voltage_scale=float(self.contract["voltage_scale"]), initial_parameters=parameters,
@@ -722,8 +723,6 @@ class DiffusionSlotReconstructor:
 
     def reconstruct_reference(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
         """Original dense, frame-wise implementation used for parity tests."""
-        from gcnm_pvi.train_voltage_vessel_gcnm import _graphs, _predict_with_parameters
-
         measured = np.asarray(voltage, dtype=np.float64)
         count, elements = len(measured), self.mappings.num_elements
         baseline = np.broadcast_to(self.baseline[None, :], (count, elements)).copy()
@@ -735,14 +734,14 @@ class DiffusionSlotReconstructor:
             regularizer=self.mappings.laplace, hyper_pvi=self.cfg.hyper_pvi,
             lambda_lm=self.cfg.lambda_lm, step_size=self.cfg.lm_step_size,
         )
-        graphs_1 = _graphs(
+        graphs_1 = make_vessel_graphs(
             zero, zero, direction_1, measured, dummy, self.positions,
             self.runtime["edge_index"],
             conductivity_scale=float(self.contract["conductivity_scale"]),
             voltage_scale=float(self.contract["voltage_scale"]),
             tissue_labels=labels, voltage_clean=measured,
         )
-        stage_1, parameters = _predict_with_parameters(
+        stage_1, parameters = predict_vessel_graphs_with_parameters(
             self.localizer, graphs_1, float(self.contract["conductivity_scale"])
         )
         residual_1, _, _ = dataset_voltage_residual_rms(
@@ -755,14 +754,14 @@ class DiffusionSlotReconstructor:
             lambda_lm=self.cfg.lambda_lm, step_size=self.cfg.lm_step_size,
             baseline_voltages=baseline_voltages,
         )
-        graphs_2 = _graphs(
+        graphs_2 = make_vessel_graphs(
             zero, stage_1, direction_2, measured, dummy, self.positions,
             self.runtime["edge_index"],
             conductivity_scale=float(self.contract["conductivity_scale"]),
             voltage_scale=float(self.contract["voltage_scale"]),
             initial_parameters=parameters, tissue_labels=labels, voltage_clean=measured,
         )
-        stage_2, _ = _predict_with_parameters(
+        stage_2, _ = predict_vessel_graphs_with_parameters(
             self.refiner, graphs_2, float(self.contract["conductivity_scale"])
         )
         residual_2, _, _ = dataset_voltage_residual_rms(
