@@ -72,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="dense",
         help="Numerical backend for the unchanged FEM forward equations.",
     )
+    parser.add_argument(
+        "--cross-backend-reference",
+        choices=("none", "dense", "sparse"),
+        default="none",
+        help=(
+            "After timing, reconstruct the same frames with another FEM backend "
+            "and report direct end-to-end output parity."
+        ),
+    )
     parser.add_argument("--device", default="auto")
 
     source = parser.add_mutually_exclusive_group()
@@ -642,14 +651,14 @@ def run(args: argparse.Namespace) -> tuple[dict, Path]:
                 }
 
             reference_count = min(args.reference_frames, len(voltage))
-            reference_report = None
+            algorithm_reference_report = None
             if reference_count:
                 _synchronize(device)
                 started = time.perf_counter()
                 reference = reconstructor.reconstruct_reference(voltage[:reference_count])
                 _synchronize(device)
                 reference_seconds = time.perf_counter() - started
-                reference_report = {
+                algorithm_reference_report = {
                     "frames": reference_count,
                     "latency_seconds": reference_seconds,
                     "parity": {
@@ -660,13 +669,57 @@ def run(args: argparse.Namespace) -> tuple[dict, Path]:
                     },
                 }
 
+        cross_backend_report = None
+        if args.cross_backend_reference != "none":
+            if args.cross_backend_reference == args.forward_backend:
+                raise ValueError(
+                    "cross-backend-reference must differ from forward-backend"
+                )
+            _synchronize(device)
+            started = time.perf_counter()
+            with CoordinateReconstructor(
+                config,
+                args.checkpoint_dir,
+                args.model_name,
+                device=device,
+                physics_mesh_mode=requested_physics_mode,
+                allow_config_hash_mismatch=args.allow_config_hash_mismatch,
+                physics_workers=args.physics_workers,
+                forward_backend=args.cross_backend_reference,
+            ) as reference_reconstructor:
+                reference_stage_1, reference_stage_2, _ = (
+                    reference_reconstructor.reconstruct_batch(
+                        voltage,
+                        model_batch_size=args.inference_batch_size,
+                        physics_workers=args.physics_workers,
+                        compute_stage2_residuals=False,
+                    )
+                )
+            _synchronize(device)
+            cross_backend_report = {
+                "candidate_backend": args.forward_backend,
+                "reference_backend": args.cross_backend_reference,
+                "frames": len(voltage),
+                "latency_seconds": time.perf_counter() - started,
+                "parity": {
+                    "stage_1": parity_metrics(
+                        outputs[50][0], reference_stage_1
+                    ),
+                    "stage_2": parity_metrics(
+                        outputs[50][1], reference_stage_2
+                    ),
+                },
+            }
+
     parity_items = [
         metric
         for scenario in scenarios.values()
         for metric in scenario["parity_vs_framewise"].values()
     ]
-    if reference_report is not None:
-        parity_items.extend(reference_report["parity"].values())
+    if algorithm_reference_report is not None:
+        parity_items.extend(algorithm_reference_report["parity"].values())
+    if cross_backend_report is not None:
+        parity_items.extend(cross_backend_report["parity"].values())
     maximum_parity_relative = max(item["relative_l2"] for item in parity_items)
     maximum_parity_absolute = max(item["maximum_absolute"] for item in parity_items)
     parity_pass = (
@@ -714,7 +767,8 @@ def run(args: argparse.Namespace) -> tuple[dict, Path]:
             "selected_voltage_sha256": selected_data_sha256(voltage),
         },
         "scenarios": {str(key): value for key, value in scenarios.items()},
-        "dense_reference": reference_report,
+        "framewise_algorithm_reference": algorithm_reference_report,
+        "cross_backend_reference": cross_backend_report,
         "comparison": {
             "batch50_speedup_vs_framewise": (
                 scenarios[1]["per_frame_latency_seconds"]

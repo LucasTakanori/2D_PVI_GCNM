@@ -28,6 +28,7 @@ def test_cli_defaults_cover_streaming_and_one_second_batch():
     assert args.npz_key == "V"
     assert args.model_name == "coordinate_direct_projected_fine"
     assert args.forward_backend == "dense"
+    assert args.cross_backend_reference == "none"
     assert not args.allow_config_hash_mismatch
     assert args.max_parity_relative_l2 == 1e-6
     assert args.max_parity_absolute == 1e-7
@@ -148,3 +149,4 @@ def test_slurm_launcher_has_inference_resource_contract():
     assert 'source "${REPO_ROOT}/env/cluster.env"' in launcher
     assert "--chunk-sizes 1 50" in launcher
     assert '--forward-backend "${FORWARD_BACKEND}"' in launcher
+    assert '--cross-backend-reference "${CROSS_BACKEND_REFERENCE}"' in launcher

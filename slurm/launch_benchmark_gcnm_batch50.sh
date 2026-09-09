@@ -43,6 +43,7 @@ REFERENCE_FRAMES="${REFERENCE_FRAMES:-1}"
 PHYSICS_WORKERS="${PHYSICS_WORKERS:-${SLURM_CPUS_PER_TASK}}"
 INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-50}"
 FORWARD_BACKEND="${FORWARD_BACKEND:-dense}"
+CROSS_BACKEND_REFERENCE="${CROSS_BACKEND_REFERENCE:-none}"
 OUTPUT="${OUTPUT:-}"
 
 ARGS=(
@@ -57,6 +58,7 @@ ARGS=(
   --physics-workers "${PHYSICS_WORKERS}"
   --inference-batch-size "${INFERENCE_BATCH_SIZE}"
   --forward-backend "${FORWARD_BACKEND}"
+  --cross-backend-reference "${CROSS_BACKEND_REFERENCE}"
   --target-hz 50
   --device cuda:0
 )
