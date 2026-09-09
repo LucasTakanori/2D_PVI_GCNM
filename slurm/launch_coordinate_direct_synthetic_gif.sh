@@ -38,7 +38,7 @@ if [[ -e "${OUTPUT}" || -e "${OUTPUT%.gif}.json" ]]; then
   exit 3
 fi
 mkdir -p "${REPORT_ROOT}"
-python -u -m gcnm_pvi.three_beat_gifs \
+python -u -m gcnm_pvi.synthetic_three_beat_gifs \
   --kind synthetic --family coordinate --component full \
   --config "${REPO_ROOT}/configs/rings_b045/US120.yaml" \
   --checkpoint-dir "${MODEL_ROOT}" --model-name coordinate_direct \

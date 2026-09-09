@@ -53,8 +53,8 @@ BASELINE_REAL_JOB="$(sbatch --parsable --time=10-00:00:00 \
   slurm/launch_evaluate_voltage_vessel.sh)"
 
 # Consolidate exact-nonlinear accuracy, real-voltage residual, and the
-# within-beat vessel-localization variation from both models.  BP performance
-# can be added with --bp-json after the corresponding pvi_ml run completes.
+# within-beat vessel-localization variation from both GCNM models. BP metrics
+# are combined separately in pvi_gcnm_bp_pipeline.
 REPORT_DIR="${REPO_ROOT}/data/faithful_results/us120_beats50_comparison"
 REPORT_JOB="$(sbatch --parsable --time=01:00:00 \
   --dependency="afterok:${NEW_SYNTH_JOB}:${NEW_REAL_JOB}:${BASELINE_SYNTH_JOB}:${BASELINE_REAL_JOB}" \

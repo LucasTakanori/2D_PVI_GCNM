@@ -7,11 +7,17 @@
 > Current authoritative summary: `SUBJECT006_STATUS.md`. Older milestone sections
 > below are retained as implementation history and may describe work that was
 > pending at the time.
+>
+> Repository split note (2026-09-08): real-session ingestion, validation, and
+> BP-facing export commands now live in the sibling `pvi_gcnm_bp_pipeline`
+> repository under the `pvi_gcnm_bp` namespace. GCNM physics, synthetic data,
+> training, evaluation, and runtime remain here.
 
 ## Current production-data status — 2026-07-12
 
-The raw-data state is maintained in `RAW_DATA_PROGRESS.md`; this section supersedes older
-references below to raw data being on another machine or all output being 32×32.
+The raw-data state is maintained in `pvi_gcnm_bp_pipeline/RAW_DATA_PROGRESS.md`;
+this section supersedes older references below to raw data being on another
+machine or all output being 32×32.
 
 | Area | Current state |
 |------|---------------|
@@ -22,13 +28,17 @@ references below to raw data being on another machine or all output being 32×32
 | Period alignment | 1,298 HDF periods matched across 11 trials; LP channel correlation >0.9998. |
 | Dataset and GCNM | 9,710 trial-disjoint samples exported; train/checkpoint/held-out inference smoke test passed. |
 
-New entrypoints are `scripts/export_ring_mesh.sh`, `scripts/export_production.sh`, and
-`scripts/validate_session.sh`, using `configs/finger_pvi08_production.yaml`
-(`meas_pattern: [0, 2]`, `hyper_pvi: 5e-4`). Run order, when authorized, is:
+The mesh entrypoint remains `scripts/export_ring_mesh.sh` here. Real-session
+entrypoints are `scripts/export_production.sh` and `scripts/validate_session.sh`
+in `pvi_gcnm_bp_pipeline`, using the core
+`configs/finger_pvi08_production.yaml` (`meas_pattern: [0, 2]`,
+`hyper_pvi: 5e-4`). Run order, when authorized, is:
 
 ```bash
 bash scripts/setup_env.sh
 export GCNM_CONFIG=configs/subject006_pvi08_production.yaml
+bash scripts/export_ring_mesh.sh US120 data/ring_meshes/subject006_US120
+cd ../pvi_gcnm_bp_pipeline
 bash scripts/export_production.sh "<bioz_dir>" "<out_dir>"
 bash scripts/validate_session.sh "<out_dir>" "<masked.h5>"
 ```
@@ -47,31 +57,15 @@ Adapt the 2D GCNM prototype to the PVI 8-electrode EIT stack so that:
 
 ## 2. What was built
 
-### 2.1 Python package `gcnm_pvi/` (22 modules)
+### 2.1 Python packages after the repository split
 
-| File | Purpose |
+| Package | Purpose |
 |------|---------|
-| `pvi_compat.py` | `np.math` shim for numpy 2 + PVI imports |
-| `paths.py` | `PVI_SOLVER_ROOT`, default `_mesh08_r64` bundle |
-| `config.py` | `GcnmConfig` dataclass + YAML loader |
-| `gcnm_physics.py` | `PviPhysics` (absolute LM) + `PviDifferentialPhysics` (calibrate, ΔV LM, production Newton step) |
-| `gcnm_differential.py` | `reconstruct_newton_series()` for pseudo-label generation |
-| `gcnm_mesh_maps.py` | Load `m2i`, Laplacian `R`, `c2f`; `elem_to_image_grid()` |
-| `gcnm_image.py` | Image MSE, comparison PNG export |
-| `gcnm_graph.py` | `edge_index` from mesh (node- or edge-sharing) |
-| `gcnm_model.py` | `GCNBlock`, training loop, `computeLMUpdates` (absolute + differential) |
-| `gcnm_phantoms.py` | Ellipse phantoms + **`perturbation`** mode (small finger-like Δσ) |
-| `sciospec_reader.py` | Offline `.eit` parser + `frame_to_vmeas` / `session_to_vmeas` |
-| `pvi_preprocess.py` | Lowpass, HP/LP split, real part extraction |
-| `runtime.py` | `build_runtime()` — meshes, physics, mappings, graph |
-| `train_gcnm.py` | CLI training |
-| `test_gcnm.py` | GCNM vs N-step LM baseline + image metrics |
-| `export_gcnm_dataset.py` | `.eit` or `vmeas.npy` → Newton σ + NPZ packs |
-| `infer_gcnm.py` | Session → GCNM σ + images |
-| `compare_to_hdf5.py` | MSE vs fundational_pvi HDF5 reference |
-| `smoke_test.py` | End-to-end on tiny in-memory mesh |
-| `tiny_mesh.py` | 8-el circle mesh for smoke test |
-| `mesh_plotters.py` | Import stub for standalone `pvi_forward` |
+| `gcnm_pvi` (this repository) | FEM physics, meshes, graphs, synthetic generators, GCNM models, training, evaluation, and reconstruction runtime |
+| `pvi_gcnm_bp` (sibling repository) | ScioSpec/HDF ingestion, participant splits, representation/Parquet export, CRT/SAMBA training, BP inference, and artifact compatibility |
+
+The original module-by-module inventory below this point is historical. See
+`README.md` and `REPOSITORY_BOUNDARY.md` for the current package contract.
 
 ### 2.2 Configuration
 
@@ -95,9 +89,9 @@ Mesh paths target **`pvi_solver/_data/_mesh08_r64/`** (corrected from non-existe
 | `scripts/smoke_test.sh` | `python -m gcnm_pvi.smoke_test` |
 | `scripts/train_gcnm.sh` | Training (`GCNM_CONFIG`, `GCNM_SAMPLES_DIR` optional) |
 | `scripts/test_gcnm.sh` | Held-out evaluation |
-| `scripts/export_dataset.sh` | ScioSpec → NPZ dataset |
-| `scripts/infer_gcnm.sh` | Trained models → images |
-| `scripts/compare_hdf5.sh` | Compare `img.npy` vs HDF5 |
+| `pvi_gcnm_bp_pipeline/scripts/export_dataset.sh` | ScioSpec → NPZ dataset |
+| `pvi_gcnm_bp_pipeline/scripts/infer_gcnm.sh` | Trained models → images |
+| `pvi_gcnm_bp_pipeline/scripts/compare_hdf5.sh` | Compare `img.npy` vs HDF5 |
 
 ### 2.4 Supporting files
 
@@ -132,30 +126,17 @@ Mesh paths target **`pvi_solver/_data/_mesh08_r64/`** (corrected from non-existe
 
 ## 4. Data flow
 
-```
-Raw ScioSpec (.eit)          HDF5 (fundational_pvi) — reference only
-        │                              │
-        ▼                              │
- sciospec_reader ──► vmeas (32,T)      │
-        │                              │
-        ▼                              │
- pvi_preprocess (HP/LP)              │
-        │                              │
-        ├──────────────────────────────┤
-        ▼                              ▼
- reconstruct_newton_series      compare_to_hdf5.py
-        │                              │
-        ▼                              │
- sigma_elem + img (32×32)      MSE vs data/pviHP/img
-        │
-        ▼
- export npz/ (V, sigma, img) ──► train_gcnm.sh ──► models/gcnm_pvi08_*.pt
-                                        │
-                                        ▼
-                                 infer_gcnm.sh ──► img.npy + PNGs
+```text
+Raw ScioSpec/HDF (pvi_gcnm_bp)
+        -> validated voltage/sample packs
+        -> GCNM training/runtime (gcnm_pvi)
+        -> ring-specific S1/S2 reconstructions
+        -> Parquet + CRT/SAMBA + BP artifacts (pvi_gcnm_bp)
 ```
 
-**Note:** Raw ScioSpec data is on **another machine** — not yet on this cluster. The export/infer scripts are ready; first validation step when data arrives is `export_dataset.sh` then `compare_hdf5.sh` against existing masked HDF5 for the same session.
+The sibling BP repository owns the real-session export, comparison, and
+inference wrappers. This core repository owns model training and reconstruction
+mathematics.
 
 ---
 
@@ -167,7 +148,7 @@ Raw ScioSpec (.eit)          HDF5 (fundational_pvi) — reference only
 | No differential / calibrate | → `PviDifferentialPhysics` |
 | No Laplacian R in LM | → `MeshMappings.rtr()`, `hyper_pvi` in config |
 | No m2i / image output | → `gcnm_mesh_maps`, `gcnm_image`, export/infer |
-| No `.eit` reader | → `sciospec_reader.py` |
+| No `.eit` reader | → `pvi_gcnm_bp.sciospec_reader` in the sibling repository |
 | Phantom-only σ range | → `perturbation` phantom mode |
 | Monolithic scripts | → package + YAML config + shell scripts |
 | numpy 2 breakage | → `pvi_compat.py` |
@@ -206,13 +187,16 @@ bash scripts/smoke_test.sh     # verify
 bash scripts/train_gcnm.sh     # synthetic
 ```
 
-When ScioSpec data is copied:
+For ScioSpec ingestion and inference, switch to the BP pipeline repository:
 
 ```bash
+cd ../pvi_gcnm_bp_pipeline
 bash scripts/export_dataset.sh /path/to/session /path/to/out
+cd ../2D_GCNM
 export GCNM_CONFIG=configs/finger_pvi08_differential.yaml
 export GCNM_SAMPLES_DIR=/path/to/out/npz
 bash scripts/train_gcnm.sh
+cd ../pvi_gcnm_bp_pipeline
 bash scripts/infer_gcnm.sh /path/to/session /path/to/infer_out
 bash scripts/compare_hdf5.sh /path/to/infer_out/img.npy /path/to/session.h5
 ```
@@ -224,10 +208,10 @@ Recommend **compute node** (`salloc`) for training and full mesh Jacobian work.
 ## 8. Open items (not blocking scaffolding)
 
 1. **Finger/ring mesh HDF5** — production geometry; current tank `_mesh08_r64` is structurally correct for 8-el protocol but not finger anatomy.
-2. **ScioSpec channel mapping validation** — `frame_to_vmeas` uses first 8 channels per stim block; confirm against your hardware `MeasurementChannels` / remap table.
-3. **Exact scionova preprocessing** — sync, masking, movmean drift removal in MATLAB pipeline not fully replicated (basic HP/LP in `pvi_preprocess.py`).
+2. **ScioSpec channel mapping validation** — maintained in `pvi_gcnm_bp`; confirm against hardware `MeasurementChannels` / remap tables.
+3. **Exact scionova preprocessing** — maintained and validated in the sibling BP pipeline.
 4. **Jacobian speed** — `pvi_forward.compute_jacobian` is Python loop; vectorization needed for large-scale training on login nodes.
-5. **infer_gcnm.py** reloads model each frame — batching optional optimization.
+5. **Real-session inference** — batching and online scheduling are owned by the sibling BP pipeline and consume the public core runtime.
 6. **Differential calibrate per session vs per frame** — current train script calibrates once on frame 0; time-series may need session-level reference frame selection matching `scionova_03_segmentation.m`.
 
 ---
@@ -247,28 +231,20 @@ Recommend **compute node** (`salloc`) for training and full mesh Jacobian work.
 
 ## 10. File inventory (new/changed in this implementation)
 
-```
+```text
 2D_GCNM/
-├── gcnm_pvi/                    (full package, 22 files)
-├── configs/
-│   ├── finger_pvi08.yaml
-│   └── finger_pvi08_differential.yaml
-├── scripts/
-│   ├── _common.sh
-│   ├── setup_env.sh
-│   ├── smoke_test.sh
-│   ├── train_gcnm.sh
-│   ├── test_gcnm.sh
-│   ├── export_dataset.sh
-│   ├── infer_gcnm.sh
-│   └── compare_hdf5.sh
-├── env/cluster.env
-├── requirements.txt
-├── README.md                    (updated)
-└── IMPLEMENTATION_REPORT.md     (this file)
+├── gcnm_pvi/                  GCNM physics, models, training, evaluation, runtime
+├── configs/                   GCNM and ring configurations
+├── scripts/                   core generation/training/evaluation entrypoints
+├── slurm/                     core cluster launchers
+├── tests/                     numerical and boundary regressions
+├── README.md
+├── REPOSITORY_BOUNDARY.md
+└── IMPLEMENTATION_REPORT.md   this historical implementation record
 ```
 
-Legacy unchanged: `GCNM_training.py`, `GCNM_testing.py`, `gcnm_pvi_extracted/`, `PVI_GCNM_ADAPTATION_PLAN.md`.
+Real-data ingestion, Parquet, BP training, and artifact workflows are inventoried
+in the sibling `pvi_gcnm_bp_pipeline` repository.
 
 ---
 

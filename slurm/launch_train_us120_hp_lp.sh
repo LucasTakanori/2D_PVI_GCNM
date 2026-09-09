@@ -97,7 +97,7 @@ python -u -m gcnm_pvi.mesh_run_manifest --record \
   --model-dir "${MODEL_DIR}" --output "${MODEL_DIR}/run_manifest.json"
 
 mkdir -p "${GIF_DIR}"
-python -u -m gcnm_pvi.three_beat_gifs \
+python -u -m gcnm_pvi.synthetic_three_beat_gifs \
   --kind synthetic --family "${FAMILY}" --component "${COMPONENT}" \
   --config "${CONFIG}" --checkpoint-dir "${MODEL_DIR}" \
   --model-name "${MODEL_NAME}" --dataset "${DATA_DIR}/test.npz" \

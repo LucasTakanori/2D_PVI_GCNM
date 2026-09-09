@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait

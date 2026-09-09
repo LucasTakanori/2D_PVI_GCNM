@@ -79,7 +79,7 @@ python -u -m gcnm_pvi.evaluate_faithful_gcnm \
   --iterations 2 --target-kind clean --baseline-mode homogeneous \
   --baseline-conductivity 0.7 --save-examples 8
 
-python -u -m gcnm_pvi.three_beat_gifs \
+python -u -m gcnm_pvi.synthetic_three_beat_gifs \
   --kind synthetic --family coordinate --component full \
   --config "${REPO_ROOT}/configs/rings_b045/US120.yaml" \
   --checkpoint-dir "${MODEL_ROOT}" --model-name coordinate_direct \

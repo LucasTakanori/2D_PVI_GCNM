@@ -55,7 +55,7 @@ fi
 
 echo "family=${FAMILY} component=${COMPONENT} dataset=${DATASET} output=${OUTPUT}"
 nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader
-python -u -m gcnm_pvi.three_beat_gifs \
+python -u -m gcnm_pvi.synthetic_three_beat_gifs \
   --kind synthetic \
   --family "${FAMILY}" \
   --component "${COMPONENT}" \

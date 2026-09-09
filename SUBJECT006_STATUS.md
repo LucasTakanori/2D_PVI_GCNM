@@ -126,18 +126,22 @@ pseudo-label.
 ## Reproducible commands
 
 ```bash
+# Run all real-ingestion commands from the BP pipeline repository.
+cd ../pvi_gcnm_bp_pipeline
+source scripts/_pipeline_env.sh
+
 # Corrected 500-frame raw export
 "$GCNM_PYTHON" \
-  -m gcnm_pvi.export_production_session \
-  --config configs/subject006_pvi08_production.yaml \
+  -m pvi_gcnm_bp.export_production_session \
+  --config "${PVI_GCNM_CONFIG_ROOT}/subject006_pvi08_production.yaml" \
   --session-dir "/path/to/subject006/baseline/trial/bioz" \
-  --out-dir data/subject006_ring_pilot500 --max-frames 500
+  --out-dir "${PVI_GCNM_DATASET_ROOT}/subject006_ring_pilot500" --max-frames 500
 
 # Frame-matched inverse validation
 bash scripts/validate_hdf_reconstruction.sh \
   /path/to/subject006_baseline_masked.h5
 
-# Leakage-safe dataset
+# Leakage-safe HDF dataset export
 bash scripts/export_hdf_gcnm_dataset.sh \
   /path/to/subject006_baseline_masked.h5
 ```
