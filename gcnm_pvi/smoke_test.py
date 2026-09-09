@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from gcnm_pvi.electrode_protocol import default_elec_configs
 from gcnm_pvi.gcnm_graph import build_edge_index
 from gcnm_pvi.gcnm_model import (
     GCNBlock,
@@ -25,7 +26,6 @@ from gcnm_pvi.gcnm_model import (
 from gcnm_pvi.gcnm_phantoms import generate_dataset
 from gcnm_pvi.gcnm_physics import PviDifferentialPhysics, PviPhysics
 from gcnm_pvi.paths import ensure_pvi_solver_on_path
-from gcnm_pvi.sciospec_reader import default_elec_configs
 from gcnm_pvi.tiny_mesh import make_tiny_circle_mesh
 
 N_SAMPLES = 12
