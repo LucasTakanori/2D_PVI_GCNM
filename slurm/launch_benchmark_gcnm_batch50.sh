@@ -16,7 +16,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(dirname "${SCRIPT_DIR}")}"
+# Slurm copies this file into its spool directory. Prefer the directory from
+# which sbatch was invoked; retain SCRIPT_DIR for direct shell execution.
+REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-$(dirname "${SCRIPT_DIR}")}}"
 cd "${REPO_ROOT}"
 source "${REPO_ROOT}/env/cluster.env"
 source "$(dirname "$(dirname "${GCNM_PYTHON}")")/bin/activate"
