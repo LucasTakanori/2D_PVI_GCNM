@@ -106,11 +106,13 @@ with CoordinateReconstructor(
     model_name,
     device="cuda:0",
     physics_workers=16,
+    forward_backend="sparse",
 ) as reconstructor:
     stage_1, stage_2, diagnostics = reconstructor.reconstruct_batch(
         voltage_50x32,
         model_batch_size=50,
         physics_workers=16,
+        compute_stage2_residuals=False,
     )
 ```
 
@@ -121,6 +123,18 @@ retain input order. The checkpoint's `physics_mesh_mode` is selected
 automatically; requesting a different mode is rejected. Stage-2 residual
 evaluation may be disabled or sampled by stride when it is not needed online,
 because it is a post-reconstruction diagnostic and does not alter either stage.
+
+The historical dense forward solver remains the default reference backend.
+For online projected-fine inference, select `forward_backend="sparse"`. The
+sparse backend assembles and factorizes the same float64 FEM/CEM system and
+does not reuse a Jacobian, reduce the mesh, or change either learned model.
+On the US120 held-out 50-frame benchmark (H100, 16 CPU physics lanes), dense
+inference required 14.57 s (3.43 frames/s), while ten repeated sparse runs
+required 0.384 s on average (130.18 frames/s), 0.398 s at p95, and 0.407 s at
+maximum. The maximum stage-output difference between sparse and dense across
+all 50 frames was 5.82e-10 S/m. A complete one-second input buffer therefore
+has about 1.38 s first-frame-to-output latency, including acquisition, while
+remaining comfortably above the required 50-frame/s sustained throughput.
 
 ## Storage during the repository split
 
