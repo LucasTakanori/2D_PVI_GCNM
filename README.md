@@ -91,6 +91,37 @@ coordinate features, and the documented target/background loss weighting. The
 experiment configurations and saved manifests remain the authority for an
 individual run.
 
+## One-second batched inference
+
+`CoordinateReconstructor` keeps both learned stages, the ring mesh, mappings,
+and private nonlinear-physics lanes resident. For a 50 Hz stream, pass one
+second of ordered measurements directly as a `(50, 32)` array:
+
+```python
+from gcnm_pvi.representations import CoordinateReconstructor
+
+with CoordinateReconstructor(
+    config_path,
+    checkpoint_directory,
+    model_name,
+    device="cuda:0",
+    physics_workers=16,
+) as reconstructor:
+    stage_1, stage_2, diagnostics = reconstructor.reconstruct_batch(
+        voltage_50x32,
+        model_batch_size=50,
+        physics_workers=16,
+    )
+```
+
+Both learned stages are evaluated in graph batches. Nonlinear stage-2 physics
+is still recomputed independently for every frame, using bounded workers with a
+private mutable FEM object per lane. Output rows and diagnostic frame indices
+retain input order. The checkpoint's `physics_mesh_mode` is selected
+automatically; requesting a different mode is rejected. Stage-2 residual
+evaluation may be disabled or sampled by stride when it is not needed online,
+because it is a post-reconstruction diagnostic and does not alter either stage.
+
 ## Storage during the repository split
 
 Existing generated data remain at their established locations under this

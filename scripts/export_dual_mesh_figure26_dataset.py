@@ -276,7 +276,7 @@ def export_subject(args: argparse.Namespace) -> None:
         os.environ["GCNM_INFERENCE_BATCH_SIZE"] = str(args.inference_batch_size)
         os.environ["GCNM_COMPUTE_STAGE2_RESIDUALS"] = "0"
         voltage, newton_hp, newton_lp = _load_subject_inputs(row)
-        allow_config_hash_mismatch = (
+        legacy_sensitivity_override = (
             manifest["checkpoint_training_physics"] == "direct coarse-mesh F_c and J_c"
         )
         reconstructor = CoordinateReconstructor(
@@ -285,9 +285,10 @@ def export_subject(args: argparse.Namespace) -> None:
             row.get("model_name", "coordinate_direct"),
             device=args.device,
             physics_mesh_mode="projected_fine",
-            allow_config_hash_mismatch=allow_config_hash_mismatch,
+            allow_config_hash_mismatch=legacy_sensitivity_override,
+            allow_physics_mode_mismatch=legacy_sensitivity_override,
         )
-        if not allow_config_hash_mismatch:
+        if not legacy_sensitivity_override:
             checkpoint_modes = {
                 checkpoint["physics_contract"].get("physics_mesh_mode")
                 for checkpoint in reconstructor.checkpoints
@@ -359,11 +360,15 @@ def export_subject(args: argparse.Namespace) -> None:
             **row,
             "schema": (
                 "pvi-gcnm-figure26-projected-fine-trained-subject-v1"
-                if not allow_config_hash_mismatch
+                if not legacy_sensitivity_override
                 else "pvi-gcnm-figure26-dual-mesh-subject-v1"
             ),
             "completed_utc": _utc_now(),
             "physics_mesh_mode": reconstructor.physics_mesh_mode,
+            "checkpoint_physics_mesh_mode": (
+                reconstructor.checkpoint_physics_mesh_mode
+            ),
+            "physics_mode_override": bool(reconstructor.physics_mode_override),
             "checkpoint_config_sha256": reconstructor.checkpoints[0]["physics_contract"][
                 "config_sha256"
             ],
@@ -378,7 +383,15 @@ def export_subject(args: argparse.Namespace) -> None:
                     "checkpoint inverse-mesh and mapping hashes plus hyper_pvi, lambda_lm, "
                     "and node-sharing connectivity."
                 )
-                if allow_config_hash_mismatch
+                if legacy_sensitivity_override
+                else None
+            ),
+            "physics_mode_override_reason": (
+                (
+                    "Intentional coarse-checkpoint/projected-fine inference used only "
+                    "for the labeled dual-mesh sensitivity export."
+                )
+                if legacy_sensitivity_override
                 else None
             ),
             "fine_elements": int(len(reconstructor.runtime["mesh_fwd"].elems)),

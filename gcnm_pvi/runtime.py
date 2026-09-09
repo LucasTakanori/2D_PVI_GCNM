@@ -41,7 +41,14 @@ def load_meshes(cfg: GcnmConfig):
     return mesh_fwd, mesh_inv, elec_configs, mappings, rtr
 
 
-def build_physics(cfg: GcnmConfig, mesh, rtr, differential: bool | None = None):
+def build_physics(
+    cfg: GcnmConfig,
+    mesh,
+    rtr,
+    differential: bool | None = None,
+    *,
+    forward_backend: str = "dense",
+):
     ensure_pvi_solver_on_path(cfg.pvi_solver_root)
     from pvi_configs import PviElecConfigs  # noqa: E402
 
@@ -53,14 +60,34 @@ def build_physics(cfg: GcnmConfig, mesh, rtr, differential: bool | None = None):
     )
     use_diff = cfg.imaging_mode == "differential" if differential is None else differential
     cls = PviDifferentialPhysics if use_diff else PviPhysics
-    return cls(mesh, elec_configs, rtr=rtr)
+    return cls(mesh, elec_configs, rtr=rtr, backend=forward_backend)
 
 
-def build_runtime(cfg: GcnmConfig, *, include_forward: bool = True):
+def build_runtime(
+    cfg: GcnmConfig,
+    *,
+    include_forward: bool = True,
+    forward_backend: str = "dense",
+):
     mesh_fwd, mesh_inv, elec_configs, mappings, rtr = load_meshes(cfg)
-    physics_fwd = PviPhysics(copy.deepcopy(mesh_fwd), elec_configs, rtr=None) if include_forward else None
+    physics_fwd = (
+        PviPhysics(
+            copy.deepcopy(mesh_fwd),
+            elec_configs,
+            rtr=None,
+            backend=forward_backend,
+        )
+        if include_forward
+        else None
+    )
     use_diff = cfg.imaging_mode == "differential"
-    physics_inv = build_physics(cfg, mesh_inv, rtr, differential=use_diff)
+    physics_inv = build_physics(
+        cfg,
+        mesh_inv,
+        rtr,
+        differential=use_diff,
+        forward_backend=forward_backend,
+    )
     edge_index = build_edge_index(mesh_inv, connectivity=cfg.connectivity)
     return {
         "mesh_fwd": mesh_fwd,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -39,12 +40,23 @@ def _validate_physics_hashes(
     config_path: Path,
     *,
     allow_config_hash_mismatch: bool = False,
+    effective_physics_mesh_mode: str | None = None,
+    allow_physics_mode_mismatch: bool = False,
 ) -> None:
     expected = {
         "config_sha256": sha256_file(config_path),
         "mesh_inverse_sha256": sha256_file(Path(cfg.mesh_inv_h5)),
         "mappings_sha256": sha256_file(Path(cfg.mappings_h5)),
     }
+    trained_mode = str(contract.get("physics_mesh_mode", "coarse"))
+    effective_mode = effective_physics_mesh_mode or trained_mode
+    deliberate_legacy_override = (
+        allow_physics_mode_mismatch
+        and trained_mode != effective_mode
+        and trained_mode == "coarse"
+    )
+    if effective_mode == "projected_fine" and not deliberate_legacy_override:
+        expected["mesh_forward_sha256"] = sha256_file(Path(cfg.mesh_fwd_h5))
     for key, value in expected.items():
         if key == "config_sha256" and allow_config_hash_mismatch:
             continue
@@ -99,7 +111,9 @@ def _predict_batched(
     return values
 
 
-def _stage_2_residual_indices(count: int) -> tuple[np.ndarray, int]:
+def _stage_2_residual_indices(
+    count: int, stride: int | None = None
+) -> tuple[np.ndarray, int]:
     """Select deterministic frames for validation-only stage-2 residuals.
 
     Reconstruction is always performed for every frame.  The optional stride
@@ -107,7 +121,10 @@ def _stage_2_residual_indices(count: int) -> tuple[np.ndarray, int]:
     voltage residual; it cannot change either stage output.
     """
 
-    stride = int(os.environ.get("GCNM_STAGE2_RESIDUAL_STRIDE", "1"))
+    if stride is None:
+        stride = int(os.environ.get("GCNM_STAGE2_RESIDUAL_STRIDE", "1"))
+    else:
+        stride = int(stride)
     if stride <= 0:
         raise ValueError("GCNM stage-2 residual stride must be positive")
     indices = np.arange(0, count, stride, dtype=np.int64)
@@ -116,17 +133,126 @@ def _stage_2_residual_indices(count: int) -> tuple[np.ndarray, int]:
     return indices, stride
 
 
+def _available_cpu_workers() -> int:
+    """Return the process CPU allowance, honoring Slurm when it is narrower."""
+
+    candidates: list[int] = []
+    try:
+        candidates.append(len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        candidates.append(os.cpu_count() or 1)
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus is not None:
+        try:
+            value = int(slurm_cpus)
+        except ValueError as exc:
+            raise ValueError("SLURM_CPUS_PER_TASK must be a positive integer") from exc
+        if value <= 0:
+            raise ValueError("SLURM_CPUS_PER_TASK must be a positive integer")
+        candidates.append(value)
+    return max(1, min(candidates))
+
+
+def _positive_integer(value: int, label: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return parsed
+
+
+def _resolve_physics_mesh_mode(
+    checkpoints: list[dict],
+    requested: str | None,
+    *,
+    allow_mismatch: bool = False,
+) -> str:
+    """Infer physics mode from both stages and reject semantic mismatches."""
+
+    checkpoint_modes = [
+        str(item["physics_contract"].get("physics_mesh_mode", "coarse"))
+        for item in checkpoints
+    ]
+    if checkpoint_modes[0] != checkpoint_modes[1]:
+        raise ValueError(
+            "stage checkpoints disagree on physics_mesh_mode: "
+            f"{checkpoint_modes[0]!r} versus {checkpoint_modes[1]!r}"
+        )
+    trained = checkpoint_modes[0]
+    if trained not in {"coarse", "projected_fine"}:
+        raise ValueError(
+            "checkpoint physics_mesh_mode must be 'coarse' or 'projected_fine'"
+        )
+    if requested is None:
+        return trained
+    if requested not in {"coarse", "projected_fine"}:
+        raise ValueError("physics_mesh_mode must be 'coarse' or 'projected_fine'")
+    if requested != trained and not allow_mismatch:
+        raise ValueError(
+            f"checkpoint was trained with {trained!r} physics, "
+            f"but {requested!r} was requested"
+        )
+    return requested
+
+
 class _ParallelPhysics:
     """Distribute independent frame physics over private mutable mesh objects."""
 
     def __init__(self, physics, workers: int | None = None) -> None:
-        requested = int(os.environ.get("GCNM_PHYSICS_WORKERS", workers or 16))
-        self.workers = max(1, requested)
+        if workers is None:
+            requested = _positive_integer(
+                os.environ.get(
+                    "GCNM_PHYSICS_WORKERS", min(16, _available_cpu_workers())
+                ),
+                "GCNM physics workers",
+            )
+        else:
+            requested = _positive_integer(workers, "GCNM physics workers")
+        # A Slurm allocation (or the process CPU affinity outside Slurm) is a
+        # hard safety boundary.  A larger request is intentionally capped.
+        self.workers = min(requested, _available_cpu_workers())
         self.physics = [physics, *(copy.deepcopy(physics) for _ in range(self.workers - 1))]
-        self.executor = ThreadPoolExecutor(max_workers=self.workers)
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.workers, thread_name_prefix="gcnm-physics"
+        )
+        self._operation_lock = threading.Lock()
+        self._closed = False
 
-    def _slices(self, count: int) -> list[np.ndarray]:
-        return [part for part in np.array_split(np.arange(count), min(count, self.workers)) if len(part)]
+    def active_workers(self, count: int, workers: int | None = None) -> int:
+        requested = self.workers
+        if workers is not None:
+            requested = _positive_integer(workers, "physics_workers")
+            if requested > self.workers:
+                raise ValueError(
+                    f"physics_workers={requested} exceeds the resident pool size "
+                    f"of {self.workers}; set physics_workers when constructing "
+                    "CoordinateReconstructor"
+                )
+        return min(max(int(count), 1), requested)
+
+    def _slices(
+        self, count: int, workers: int | None = None
+    ) -> list[np.ndarray]:
+        lanes = self.active_workers(count, workers)
+        return [
+            part
+            for part in np.array_split(np.arange(count), lanes)
+            if len(part)
+        ]
+
+    def close(self) -> None:
+        """Release resident worker threads after all current physics completes."""
+
+        with self._operation_lock:
+            if not self._closed:
+                self.executor.shutdown(wait=True)
+                self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("the GCNM physics worker pool is closed")
 
     def lm_directions(
         self,
@@ -141,27 +267,30 @@ class _ParallelPhysics:
         minimum_conductivity: float,
         baseline_voltages: np.ndarray,
         system_solver: LowRankRegularizedSolver | None,
+        workers: int | None = None,
     ):
-        parts = self._slices(len(measured))
-        futures = []
-        for lane, indices in enumerate(parts):
-            futures.append(
-                self.executor.submit(
-                    dataset_lm_directions,
-                    self.physics[lane],
-                    baseline[indices],
-                    current[indices],
-                    measured[indices],
-                    regularizer=regularizer,
-                    hyper_pvi=hyper_pvi,
-                    lambda_lm=lambda_lm,
-                    step_size=step_size,
-                    minimum_conductivity=minimum_conductivity,
-                    baseline_voltages=baseline_voltages[indices],
-                    system_solver=system_solver,
+        with self._operation_lock:
+            self._ensure_open()
+            parts = self._slices(len(measured), workers)
+            futures = []
+            for lane, indices in enumerate(parts):
+                futures.append(
+                    self.executor.submit(
+                        dataset_lm_directions,
+                        self.physics[lane],
+                        baseline[indices],
+                        current[indices],
+                        measured[indices],
+                        regularizer=regularizer,
+                        hyper_pvi=hyper_pvi,
+                        lambda_lm=lambda_lm,
+                        step_size=step_size,
+                        minimum_conductivity=minimum_conductivity,
+                        baseline_voltages=baseline_voltages[indices],
+                        system_solver=system_solver,
+                    )
                 )
-            )
-        results = [future.result() for future in futures]
+            results = [future.result() for future in futures]
         return (
             np.concatenate([item[0] for item in results]),
             [diagnostic for item in results for diagnostic in item[1]],
@@ -176,22 +305,25 @@ class _ParallelPhysics:
         *,
         minimum_conductivity: float,
         baseline_voltages: np.ndarray,
+        workers: int | None = None,
     ):
-        parts = self._slices(len(measured))
-        futures = []
-        for lane, indices in enumerate(parts):
-            futures.append(
-                self.executor.submit(
-                    dataset_voltage_residual_rms,
-                    self.physics[lane],
-                    baseline[indices],
-                    current[indices],
-                    measured[indices],
-                    minimum_conductivity=minimum_conductivity,
-                    baseline_voltages=baseline_voltages[indices],
+        with self._operation_lock:
+            self._ensure_open()
+            parts = self._slices(len(measured), workers)
+            futures = []
+            for lane, indices in enumerate(parts):
+                futures.append(
+                    self.executor.submit(
+                        dataset_voltage_residual_rms,
+                        self.physics[lane],
+                        baseline[indices],
+                        current[indices],
+                        measured[indices],
+                        minimum_conductivity=minimum_conductivity,
+                        baseline_voltages=baseline_voltages[indices],
+                    )
                 )
-            )
-        results = [future.result() for future in futures]
+            results = [future.result() for future in futures]
         return (
             np.concatenate([item[0] for item in results]),
             np.concatenate([item[1] for item in results]),
@@ -207,29 +339,47 @@ class CoordinateReconstructor:
         model_name: str,
         device=None,
         *,
-        physics_mesh_mode: str = "coarse",
+        physics_mesh_mode: str | None = None,
         allow_config_hash_mismatch: bool = False,
+        allow_physics_mode_mismatch: bool = False,
+        physics_workers: int | None = None,
+        forward_backend: str = "dense",
     ) -> None:
         self.config_path = Path(config)
         self.cfg = GcnmConfig.from_yaml(config)
-        if physics_mesh_mode not in {"coarse", "projected_fine"}:
-            raise ValueError(
-                "physics_mesh_mode must be 'coarse' or 'projected_fine'"
-            )
-        self.physics_mesh_mode = physics_mesh_mode
-        self.runtime = build_runtime(
-            self.cfg, include_forward=physics_mesh_mode == "projected_fine"
-        )
         self.device = torch.device(device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
-        self.positions = element_positions(self.runtime["mesh_inv"]).astype(np.float32)
-        self.checkpoints = []
-        self.models = []
-        for stage in range(2):
-            checkpoint = torch.load(
+        loaded_checkpoints = [
+            torch.load(
                 Path(checkpoint_dir) / f"{model_name}_{stage}.pt",
                 map_location=self.device,
                 weights_only=False,
             )
+            for stage in range(2)
+        ]
+        physics_mesh_mode = _resolve_physics_mesh_mode(
+            loaded_checkpoints,
+            physics_mesh_mode,
+            allow_mismatch=allow_physics_mode_mismatch,
+        )
+        self.checkpoint_physics_mesh_mode = str(
+            loaded_checkpoints[0]["physics_contract"].get(
+                "physics_mesh_mode", "coarse"
+            )
+        )
+        self.physics_mode_override = (
+            physics_mesh_mode != self.checkpoint_physics_mesh_mode
+        )
+        self.physics_mesh_mode = physics_mesh_mode
+        self.forward_backend = forward_backend
+        self.runtime = build_runtime(
+            self.cfg,
+            include_forward=physics_mesh_mode == "projected_fine",
+            forward_backend=forward_backend,
+        )
+        self.positions = element_positions(self.runtime["mesh_inv"]).astype(np.float32)
+        self.checkpoints = []
+        self.models = []
+        for checkpoint in loaded_checkpoints:
             if not checkpoint.get("use_coordinates", False):
                 raise ValueError("coordinate family checkpoint does not enable coordinates")
             contract = checkpoint["physics_contract"]
@@ -238,6 +388,8 @@ class CoordinateReconstructor:
                 self.cfg,
                 self.config_path,
                 allow_config_hash_mismatch=allow_config_hash_mismatch,
+                effective_physics_mesh_mode=physics_mesh_mode,
+                allow_physics_mode_mismatch=allow_physics_mode_mismatch,
             )
             if contract.get("baseline_mode") != "homogeneous" or not np.isclose(
                 float(contract.get("baseline_conductivity", np.nan)), 0.7
@@ -281,27 +433,147 @@ class CoordinateReconstructor:
             hyper_pvi=self.cfg.hyper_pvi,
             lambda_lm=self.cfg.lambda_lm,
         )
-        self.parallel_physics = _ParallelPhysics(stage_physics)
+        self.parallel_physics = _ParallelPhysics(stage_physics, workers=physics_workers)
+        # The FEM objects are mutable.  Serialize calls on one resident
+        # reconstructor while still parallelizing independent frames inside a
+        # call across its private physics lanes.
+        self._reconstruction_lock = threading.Lock()
 
     @property
     def mappings(self):
         return self.runtime["mappings"]
 
-    def reconstruct(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
+    def close(self) -> None:
+        """Release the resident physics worker pool."""
+
+        with self._reconstruction_lock:
+            self.parallel_physics.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def _validate_voltage_batch(self, voltage: np.ndarray) -> np.ndarray:
         measured = np.asarray(voltage, dtype=np.float64)
+        if measured.ndim != 2:
+            raise ValueError(
+                "voltage batch must have shape (frames, measurements)"
+            )
+        if measured.shape[0] == 0:
+            raise ValueError("voltage batch must contain at least one frame")
+        expected = [
+            int(item["physics_contract"].get("num_measurements", 32))
+            for item in self.checkpoints
+        ]
+        if expected[0] != expected[1]:
+            raise ValueError("stage checkpoints disagree on the measurement count")
+        if measured.shape[1] != expected[0]:
+            raise ValueError(
+                f"voltage batch has {measured.shape[1]} measurements per frame; "
+                f"checkpoint requires {expected[0]}"
+            )
+        if not np.all(np.isfinite(measured)):
+            raise ValueError("voltage batch contains non-finite values")
+        return measured
+
+    def reconstruct(
+        self, voltage: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Reconstruct a frame batch using environment-configured controls.
+
+        This remains the backward-compatible entrypoint.  Online callers that
+        need explicit controls should use :meth:`reconstruct_batch`.
+        """
+
+        return self.reconstruct_batch(voltage)
+
+    def reconstruct_batch(
+        self,
+        voltage: np.ndarray,
+        *,
+        model_batch_size: int | None = None,
+        physics_workers: int | None = None,
+        compute_stage2_residuals: bool | None = None,
+        stage2_residual_stride: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Reconstruct an ordered batch, including a one-second 50-frame batch.
+
+        Models, graph topology, mappings, and FEM objects stay resident on this
+        instance.  Learned graph stages are evaluated in real PyG batches and
+        nonlinear frame physics uses at most ``physics_workers`` private lanes.
+        The returned arrays and diagnostic indices retain input frame order.
+        """
+
+        measured = self._validate_voltage_batch(voltage)
+        if model_batch_size is None:
+            model_batch_size = _positive_integer(
+                os.environ.get("GCNM_INFERENCE_BATCH_SIZE", "64"),
+                "model_batch_size",
+            )
+        else:
+            model_batch_size = _positive_integer(
+                model_batch_size, "model_batch_size"
+            )
+        active_physics_workers = self.parallel_physics.active_workers(
+            len(measured), physics_workers
+        )
+        if compute_stage2_residuals is None:
+            compute_stage2_residuals = os.environ.get(
+                "GCNM_COMPUTE_STAGE2_RESIDUALS", "1"
+            ).lower() not in {"0", "false", "no"}
+        if not isinstance(compute_stage2_residuals, (bool, np.bool_)):
+            raise TypeError("compute_stage2_residuals must be a boolean")
+        if stage2_residual_stride is not None:
+            stage2_residual_stride = _positive_integer(
+                stage2_residual_stride, "stage2_residual_stride"
+            )
+
+        with self._reconstruction_lock:
+            return self._reconstruct_batch_unlocked(
+                measured,
+                model_batch_size=model_batch_size,
+                physics_workers=physics_workers,
+                active_physics_workers=active_physics_workers,
+                compute_stage2_residuals=bool(compute_stage2_residuals),
+                stage2_residual_stride=stage2_residual_stride,
+            )
+
+    def _reconstruct_batch_unlocked(
+        self,
+        measured: np.ndarray,
+        *,
+        model_batch_size: int,
+        physics_workers: int | None,
+        active_physics_workers: int,
+        compute_stage2_residuals: bool,
+        stage2_residual_stride: int | None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        total_started = time.perf_counter()
         elements = self.mappings.num_elements
         truth = np.zeros((len(measured), elements), dtype=np.float64)
         baseline = np.broadcast_to(self.baseline[None, :], truth.shape)
         zero = np.zeros_like(truth)
+        started = time.perf_counter()
         direction_1, _, baseline_voltages = self.fixed_stage.solve_many(measured)
+        fixed_stage_seconds = time.perf_counter() - started
         checkpoint_1, checkpoint_2 = self.checkpoints
+        started = time.perf_counter()
         graphs_1 = make_coordinate_graphs(
             truth, zero, direction_1, self.positions, self.runtime["edge_index"],
             scale=float(checkpoint_1["scale"]), use_coordinates=True, positive_weight=0.0,
             voltage=measured if checkpoint_1.get("use_voltage_mlp", False) else None,
             voltage_scale=float(checkpoint_1.get("voltage_scale", 1.0)),
         )
-        stage_1 = _predict_batched(self.models[0], graphs_1, float(checkpoint_1["scale"]))
+        stage_1_graph_seconds = time.perf_counter() - started
+        started = time.perf_counter()
+        stage_1 = _predict_batched(
+            self.models[0], graphs_1, float(checkpoint_1["scale"]),
+            batch_size=model_batch_size,
+        )
+        stage_1_model_seconds = time.perf_counter() - started
+        started = time.perf_counter()
         direction_2, diagnostics_2, _ = self.parallel_physics.lm_directions(
             baseline, stage_1, measured,
             regularizer=self.mappings.laplace,
@@ -313,19 +585,28 @@ class CoordinateReconstructor:
             ),
             baseline_voltages=baseline_voltages,
             system_solver=self.nonlinear_solver,
+            workers=physics_workers,
         )
+        nonlinear_physics_seconds = time.perf_counter() - started
+        started = time.perf_counter()
         graphs_2 = make_coordinate_graphs(
             truth, stage_1, direction_2, self.positions, self.runtime["edge_index"],
             scale=float(checkpoint_2["scale"]), use_coordinates=True, positive_weight=0.0,
             voltage=measured if checkpoint_2.get("use_voltage_mlp", False) else None,
             voltage_scale=float(checkpoint_2.get("voltage_scale", 1.0)),
         )
-        stage_2 = _predict_batched(self.models[1], graphs_2, float(checkpoint_2["scale"]))
-        compute_residuals = os.environ.get(
-            "GCNM_COMPUTE_STAGE2_RESIDUALS", "1"
-        ).lower() not in {"0", "false", "no"}
-        if compute_residuals:
-            residual_indices, residual_stride = _stage_2_residual_indices(len(measured))
+        stage_2_graph_seconds = time.perf_counter() - started
+        started = time.perf_counter()
+        stage_2 = _predict_batched(
+            self.models[1], graphs_2, float(checkpoint_2["scale"]),
+            batch_size=model_batch_size,
+        )
+        stage_2_model_seconds = time.perf_counter() - started
+        if compute_stage2_residuals:
+            started = time.perf_counter()
+            residual_indices, residual_stride = _stage_2_residual_indices(
+                len(measured), stage2_residual_stride
+            )
             residual_2, _, _ = self.parallel_physics.residual_rms(
                 baseline[residual_indices],
                 stage_2[residual_indices],
@@ -336,16 +617,40 @@ class CoordinateReconstructor:
                     )
                 ),
                 baseline_voltages=baseline_voltages[residual_indices],
+                workers=physics_workers,
             )
+            residual_seconds = time.perf_counter() - started
         else:
             residual_2 = np.empty(0, dtype=np.float64)
+            residual_indices = np.empty(0, dtype=np.int64)
             residual_stride = 0
+            residual_seconds = 0.0
+        frame_indices = np.arange(len(measured), dtype=np.int64)
         return stage_1, stage_2, {
             "stage_1_forward_voltage_rms": np.asarray(
                 [item.voltage_residual_rms for item in diagnostics_2]
             ),
             "stage_2_forward_voltage_rms": np.asarray(residual_2),
             "stage_2_forward_voltage_rms_stride": residual_stride,
+            "stage_1_forward_voltage_rms_indices": frame_indices,
+            "stage_2_forward_voltage_rms_indices": residual_indices,
+            "frame_indices": frame_indices,
+            "batch": {
+                "frames": len(measured),
+                "measurements": measured.shape[1],
+                "model_batch_size": model_batch_size,
+                "physics_workers": active_physics_workers,
+            },
+            "timings_seconds": {
+                "fixed_stage_physics": fixed_stage_seconds,
+                "stage_1_graph_build": stage_1_graph_seconds,
+                "stage_1_model": stage_1_model_seconds,
+                "nonlinear_stage_2_physics": nonlinear_physics_seconds,
+                "stage_2_graph_build": stage_2_graph_seconds,
+                "stage_2_model": stage_2_model_seconds,
+                "stage_2_residual": residual_seconds,
+                "total": time.perf_counter() - total_started,
+            },
         }
 
     def reconstruct_reference(self, voltage: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:

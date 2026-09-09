@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 from scipy import linalg
+from scipy import sparse
+from scipy.sparse.linalg import splu
 
 from gcnm_pvi.paths import ensure_pvi_solver_on_path
 
@@ -14,12 +16,24 @@ from pvi_forward import PviForward  # noqa: E402
 class PviPhysics:
     """Voltage-normalized LM step on a PVI mesh (GCNM-compatible)."""
 
-    def __init__(self, mesh, elec_configs, rtr: np.ndarray | None = None):
+    def __init__(
+        self,
+        mesh,
+        elec_configs,
+        rtr: np.ndarray | None = None,
+        *,
+        backend: str = "dense",
+    ):
+        if backend not in {"dense", "sparse"}:
+            raise ValueError(
+                f"unknown PVI forward backend {backend!r}; expected 'dense' or 'sparse'"
+            )
         self.mesh = mesh
         self.elec_configs = elec_configs
         self.num_meas = elec_configs.num_meas_total
         self.num_elems = len(mesh.elems)
         self.rtr = rtr
+        self.backend = backend
         self._dyad_cache: np.ndarray | None = None
         self._prepare_forward_cache()
 
@@ -48,18 +62,56 @@ class PviPhysics:
         self._core_flat_indices = (
             row_nodes * num_nodes + col_nodes
         ).reshape(-1)
+        self._core_rows = row_nodes.reshape(-1)
+        self._core_cols = col_nodes.reshape(-1)
         self._core_dyads = dyads_by_element.reshape(len(elements), -1)
 
-        ae, aq, ad = prototype._make_matrix_cem(self.mesh)
-        constant = np.block([[ae, aq], [aq.T, ad]]).astype(np.float64, copy=False)
         ground = int(self.mesh.elecs[0].nodes[0])
-        constant[:, ground] = 0.0
-        constant[ground, :] = 0.0
-        constant[ground, ground] = 1.0
-        self._constant_stiffness = constant
         self._num_nodes = num_nodes
         self._num_elecs = num_elecs
         self._ground_node = ground
+        ae, aq, ad = prototype._make_matrix_cem(self.mesh)
+        constant = np.block([[ae, aq], [aq.T, ad]]).astype(np.float64, copy=False)
+        constant[:, ground] = 0.0
+        constant[ground, :] = 0.0
+        constant[ground, ground] = 1.0
+        constant_rows, constant_cols = np.nonzero(constant)
+        self._constant_rows = constant_rows.astype(np.int64, copy=False)
+        self._constant_cols = constant_cols.astype(np.int64, copy=False)
+        self._constant_values = constant[constant_rows, constant_cols]
+        # Sparse instances keep only the exact entries extracted from the
+        # historical dense CEM construction; the one-time dense allocation is
+        # released before any frame solve.
+        self._constant_stiffness: np.ndarray | None = (
+            constant if self.backend == "dense" else None
+        )
+        self._grounded_core = (self._core_rows == ground) | (
+            self._core_cols == ground
+        )
+        self._sparse_rows = np.concatenate(
+            (self._constant_rows, self._core_rows)
+        )
+        self._sparse_cols = np.concatenate(
+            (self._constant_cols, self._core_cols)
+        )
+
+        # These arrays describe mesh topology and CEM terms only. Marking them
+        # read-only makes a prepared pattern safe to share while every physics
+        # lane still creates its own numeric matrix and LU factorization.
+        for pattern in (
+            self._core_flat_indices,
+            self._core_rows,
+            self._core_cols,
+            self._constant_rows,
+            self._constant_cols,
+            self._constant_values,
+            self._grounded_core,
+            self._sparse_rows,
+            self._sparse_cols,
+            self._core_dyads,
+            self._dyad_cache,
+        ):
+            pattern.flags.writeable = False
 
         zero_nodes = np.zeros((num_nodes, num_elecs), dtype=np.float64)
         current = float(self.elec_configs.stim_config.current)
@@ -76,14 +128,10 @@ class PviPhysics:
             self.elec_configs.potential_config.extractor, dtype=np.float64
         )
 
-    def _forward(self, sigma: np.ndarray) -> PviForward:
-        conductivity = np.asarray(sigma, dtype=np.float64).ravel()
-        if len(conductivity) != self.num_elems:
-            raise ValueError(
-                f"conductivity has {len(conductivity)} elements, expected {self.num_elems}"
-            )
-        self.mesh.elems_data = conductivity
-        fwd = PviForward(mesh=self.mesh, elec_configs=self.elec_configs)
+    def _solve_dense(self, conductivity: np.ndarray) -> np.ndarray:
+        """Reference dense assembly and solve (the historical default)."""
+        if self._constant_stiffness is None:
+            raise RuntimeError("dense CEM cache is unavailable for sparse backend")
         core_values = (conductivity[:, None] * self._core_dyads).reshape(-1)
         core = np.bincount(
             self._core_flat_indices,
@@ -97,12 +145,53 @@ class PviPhysics:
         stiffness[:, self._ground_node] = 0.0
         stiffness[self._ground_node, :] = 0.0
         stiffness[self._ground_node, self._ground_node] = 1.0
-        solutions = linalg.solve(
+        return linalg.solve(
             stiffness,
             self._combined_rhs,
             assume_a="gen",
             check_finite=False,
             overwrite_a=True,
+        )
+
+    def _assemble_sparse_stiffness(
+        self, conductivity: np.ndarray
+    ) -> sparse.csc_matrix:
+        """Assemble the identical CEM system from cached COO contributions."""
+        total_size = self._num_nodes + self._num_elecs
+        core_values = (conductivity[:, None] * self._core_dyads).reshape(-1)
+
+        # Keep all nine cached FEM positions per triangle. Contributions on
+        # the grounded row or column are numerically zeroed before assembly;
+        # the cached CEM data contains the sole unit ground diagonal.
+        core_values[self._grounded_core] = 0.0
+        values = np.concatenate((self._constant_values, core_values))
+        stiffness = sparse.coo_matrix(
+            (values, (self._sparse_rows, self._sparse_cols)),
+            shape=(total_size, total_size),
+            dtype=np.float64,
+        ).tocsc()
+        stiffness.sum_duplicates()
+        stiffness.eliminate_zeros()
+        return stiffness
+
+    def _solve_sparse(self, conductivity: np.ndarray) -> np.ndarray:
+        """Sparse exact solve with a lane-local CSC matrix and SuperLU."""
+        stiffness = self._assemble_sparse_stiffness(conductivity)
+        factor = splu(stiffness)
+        return factor.solve(self._combined_rhs)
+
+    def _forward(self, sigma: np.ndarray) -> PviForward:
+        conductivity = np.asarray(sigma, dtype=np.float64).ravel()
+        if len(conductivity) != self.num_elems:
+            raise ValueError(
+                f"conductivity has {len(conductivity)} elements, expected {self.num_elems}"
+            )
+        self.mesh.elems_data = conductivity
+        fwd = PviForward(mesh=self.mesh, elec_configs=self.elec_configs)
+        solutions = (
+            self._solve_dense(conductivity)
+            if self.backend == "dense"
+            else self._solve_sparse(conductivity)
         )
         direct = solutions[:, : self._num_elecs]
         reciprocal = solutions[:, self._num_elecs :]
@@ -193,8 +282,15 @@ class PviPhysics:
 class PviDifferentialPhysics(PviPhysics):
     """PVI-faithful differential imaging (reference frame + calibration)."""
 
-    def __init__(self, mesh, elec_configs, rtr: np.ndarray | None = None):
-        super().__init__(mesh, elec_configs, rtr=rtr)
+    def __init__(
+        self,
+        mesh,
+        elec_configs,
+        rtr: np.ndarray | None = None,
+        *,
+        backend: str = "dense",
+    ):
+        super().__init__(mesh, elec_configs, rtr=rtr, backend=backend)
         self.sigma_init: np.ndarray | None = None
         self.sigma_ref: np.ndarray | None = None
         self.V_init: np.ndarray | None = None

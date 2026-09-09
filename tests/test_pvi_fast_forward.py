@@ -1,6 +1,7 @@
 import copy
 
 import numpy as np
+import pytest
 
 from gcnm_pvi.config import GcnmConfig
 from gcnm_pvi.gcnm_physics import PviPhysics
@@ -45,3 +46,72 @@ def test_cached_forward_matches_upstream_pvi_equations():
         rtol=2e-11,
         atol=1e-16,
     )
+
+
+def test_sparse_forward_matches_dense_voltage_and_jacobian():
+    config = GcnmConfig.from_yaml("configs/rings_b045/US120.yaml")
+    ensure_pvi_solver_on_path(config.pvi_solver_root)
+    _forward_mesh, inverse_mesh, electrode_configs, _mappings, _rtr = load_meshes(
+        config
+    )
+    dense = PviPhysics(copy.deepcopy(inverse_mesh), electrode_configs)
+    sparse = PviPhysics(
+        copy.deepcopy(inverse_mesh), electrode_configs, backend="sparse"
+    )
+    assert dense.backend == "dense"
+
+    rng = np.random.default_rng(729)
+    conductivities = (
+        np.full(dense.num_elems, 0.7, dtype=np.float64),
+        np.linspace(0.45, 0.95, dense.num_elems, dtype=np.float64),
+        np.clip(
+            0.7 + 0.08 * rng.standard_normal(dense.num_elems),
+            0.35,
+            1.05,
+        ),
+    )
+    for conductivity in conductivities:
+        voltage_dense, jacobian_dense = dense.forward_and_jacobian(conductivity)
+        voltage_sparse, jacobian_sparse = sparse.forward_and_jacobian(conductivity)
+        np.testing.assert_allclose(
+            voltage_sparse,
+            voltage_dense,
+            rtol=5e-11,
+            atol=5e-14,
+        )
+        np.testing.assert_allclose(
+            jacobian_sparse,
+            jacobian_dense,
+            rtol=1e-10,
+            atol=2e-15,
+        )
+
+
+def test_sparse_assembly_has_exact_ground_constraint_and_cached_patterns():
+    config = GcnmConfig.from_yaml("configs/rings_b045/US120.yaml")
+    ensure_pvi_solver_on_path(config.pvi_solver_root)
+    _forward_mesh, inverse_mesh, electrode_configs, _mappings, _rtr = load_meshes(
+        config
+    )
+    physics = PviPhysics(
+        copy.deepcopy(inverse_mesh), electrode_configs, backend="sparse"
+    )
+    conductivity = np.linspace(0.5, 0.9, physics.num_elems, dtype=np.float64)
+    stiffness = physics._assemble_sparse_stiffness(conductivity)
+    ground = physics._ground_node
+
+    assert stiffness.format == "csc"
+    assert stiffness.getrow(ground).nnz == 1
+    assert stiffness.getcol(ground).nnz == 1
+    assert stiffness[ground, ground] == 1.0
+    assert physics._core_rows.size == 9 * physics.num_elems
+    assert physics._core_cols.size == 9 * physics.num_elems
+    assert not physics._core_rows.flags.writeable
+    assert not physics._constant_values.flags.writeable
+    assert not physics._sparse_rows.flags.writeable
+    assert physics._constant_stiffness is None
+
+
+def test_forward_backend_rejects_unknown_name():
+    with pytest.raises(ValueError, match="expected 'dense' or 'sparse'"):
+        PviPhysics(None, None, backend="iterative")
