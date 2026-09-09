@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,15 @@ class GcnmConfig:
         cfg = cls()
         if "pvi_solver_root" in raw:
             p = Path(raw["pvi_solver_root"])
-            cfg.pvi_solver_root = p if p.is_absolute() else (base_dir / p).resolve()
+            configured_root = p if p.is_absolute() else (base_dir / p).resolve()
+            if (
+                not p.is_absolute()
+                and not configured_root.is_dir()
+                and os.environ.get("PVI_SOLVER_ROOT")
+            ):
+                cfg.pvi_solver_root = default_pvi_solver_root()
+            else:
+                cfg.pvi_solver_root = configured_root
         bundle = default_mesh_bundle(cfg.pvi_solver_root)
         for key in ("mesh_fwd_h5", "mesh_inv_h5", "mappings_h5"):
             if key in raw:
