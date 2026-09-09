@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--registry",
         type=Path,
         default=ROOT / "data/registries/main_b045_v1.json",
-        help="Used to resolve the default HDF5 and, unless overridden, config.",
+        help="Used to resolve the HDF5 source; pass the matching ring config explicitly.",
     )
     parser.add_argument("--source-name", default="subject006_baseline")
     parser.add_argument("--hdf5-dataset", default="data/pviHP/resistance")

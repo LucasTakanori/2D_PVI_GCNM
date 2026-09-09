@@ -152,6 +152,7 @@ No generated-data directory is part of the source-removal step.
 
 ## Documentation
 
+- `docs/USING_TRAINED_GCNM.md` — installation and inference tutorial for existing model weights
 - `REPOSITORY_BOUNDARY.md` — authoritative ownership, dependency, storage, and recovery contract
 - `ANATOMICAL_GCNM.md` — anatomical phantom and clean-supervision design
 - `SUBJECT006_STATUS.md` — subject-6 geometry and reconstruction evidence
