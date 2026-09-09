@@ -148,6 +148,40 @@ def test_parallel_low_rank_directions_preserve_serial_order_and_values(monkeypat
     assert parallel[1] == serial[1]
 
 
+def test_process_low_rank_directions_preserve_serial_order_and_values(monkeypatch):
+    monkeypatch.setenv("GCNM_PHYSICS_EXECUTOR", "process")
+    monkeypatch.delenv("GCNM_PHYSICS_WORKERS", raising=False)
+    rng = np.random.default_rng(120)
+    samples, elements, measurements = 8, 24, 6
+    jacobian = rng.normal(size=(measurements, elements))
+    difference = sparse.diags(
+        [-np.ones(elements - 1), np.ones(elements - 1)], [0, 1],
+        shape=(elements - 1, elements),
+    )
+    regularizer = (difference.T @ difference).tocsr()
+    baseline = np.full((samples, elements), 0.7)
+    current = rng.normal(scale=0.01, size=(samples, elements))
+    measured = rng.normal(scale=0.02, size=(samples, measurements))
+    physics = _LinearPhysics(jacobian)
+    baseline_voltage = np.stack([physics.solve(item) for item in baseline])
+    solver = LowRankRegularizedSolver(
+        regularizer, elements, hyper_pvi=5e-4, lambda_lm=0.0
+    )
+    serial = dataset_lm_directions(
+        physics, baseline, current, measured,
+        regularizer=regularizer, hyper_pvi=5e-4, lambda_lm=0.0,
+        baseline_voltages=baseline_voltage, system_solver=solver,
+    )
+    parallel = parallel_dataset_lm_directions(
+        physics, baseline, current, measured,
+        regularizer=regularizer, hyper_pvi=5e-4, lambda_lm=0.0,
+        baseline_voltages=baseline_voltage, system_solver=solver, workers=3,
+    )
+    np.testing.assert_allclose(parallel[0], serial[0], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(parallel[2], serial[2], rtol=0, atol=0)
+    assert parallel[1] == serial[1]
+
+
 def test_parallel_absolute_directions_preserve_serial_order(monkeypatch):
     monkeypatch.delenv("GCNM_PHYSICS_WORKERS", raising=False)
     rng = np.random.default_rng(44)

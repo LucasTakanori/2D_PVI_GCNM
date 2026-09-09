@@ -110,13 +110,23 @@ The dependency chain is:
 5. Merge and validate all coordinate parts against source HDF5 and frozen
    splits.
 6. Train the 364 CRT BP experiments using 16 workers across four GPUs.
-7. Generate prediction-aligned artifact GIFs.
+7. Generate prediction-aligned artifact GIFs with the parallel renderer.
 
 The production launchers request up to four GPUs, 64 CPUs, 1,000 GB of memory,
 and a 10-day wall limit where the full workload needs it. Packed BP training
 runs four independent CRT processes per GPU. The Parquet exporter batches
 inference, deduplicates repeated source frames, and disables optional stage-2
 residual diagnostics during export.
+
+Future artifact-GIF arrays use
+`slurm/launch_coordinate_main_b045_bp_gifs_parallel.sh`. Each array task
+requests four CPUs and runs four frame-render processes while reusing its
+Matplotlib figures and colorbars. The array admits up to 16 tasks, fully using
+64 physical cores without nested BLAS oversubscription. This layout was faster
+than assigning additional frame workers to fewer subjects. Temporary PNG
+frames stay on node-local `$TMPDIR`. The original
+`launch_coordinate_main_b045_bp_gifs.sh` remains available only for
+already-submitted legacy arrays.
 
 ## 5. Resume BP training safely
 

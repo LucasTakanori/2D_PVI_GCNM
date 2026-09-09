@@ -21,17 +21,38 @@ from gcnm_pvi.iterative_physics import (
 )
 from gcnm_pvi.runtime import build_runtime
 from gcnm_pvi.mesh_registry import sha256_file
+from gcnm_pvi.dual_mesh_physics import ProjectedFineMeshPhysics
 
 
-def _validate_physics_hashes(contract: dict, cfg: GcnmConfig, config_path: Path) -> None:
+def _validate_physics_hashes(
+    contract: dict,
+    cfg: GcnmConfig,
+    config_path: Path,
+    *,
+    allow_config_hash_mismatch: bool = False,
+) -> None:
     expected = {
         "config_sha256": sha256_file(config_path),
         "mesh_inverse_sha256": sha256_file(Path(cfg.mesh_inv_h5)),
         "mappings_sha256": sha256_file(Path(cfg.mappings_h5)),
     }
     for key, value in expected.items():
+        if key == "config_sha256" and allow_config_hash_mismatch:
+            continue
         if contract.get(key) != value:
             raise ValueError(f"checkpoint {key} does not match selected ring configuration")
+    if allow_config_hash_mismatch:
+        critical = {
+            "hyper_pvi": float(cfg.hyper_pvi),
+            "lambda_lm": float(cfg.lambda_lm),
+        }
+        for key in ("hyper_pvi", "lambda_lm"):
+            if not np.isclose(float(contract.get(key, np.nan)), critical[key]):
+                raise ValueError(
+                    f"checkpoint {key} differs from the current ring configuration"
+                )
+        if cfg.connectivity != "node":
+            raise ValueError("coordinate checkpoints require node-sharing graph connectivity")
 
 
 def _predict_batched(
@@ -170,12 +191,28 @@ class _ParallelPhysics:
 
 
 class CoordinateReconstructor:
-    def __init__(self, config: Path, checkpoint_dir: Path, model_name: str, device=None) -> None:
+    def __init__(
+        self,
+        config: Path,
+        checkpoint_dir: Path,
+        model_name: str,
+        device=None,
+        *,
+        physics_mesh_mode: str = "coarse",
+        allow_config_hash_mismatch: bool = False,
+    ) -> None:
         from gcnm_pvi.train_faithful_gcnm import _model
 
         self.config_path = Path(config)
         self.cfg = GcnmConfig.from_yaml(config)
-        self.runtime = build_runtime(self.cfg, include_forward=False)
+        if physics_mesh_mode not in {"coarse", "projected_fine"}:
+            raise ValueError(
+                "physics_mesh_mode must be 'coarse' or 'projected_fine'"
+            )
+        self.physics_mesh_mode = physics_mesh_mode
+        self.runtime = build_runtime(
+            self.cfg, include_forward=physics_mesh_mode == "projected_fine"
+        )
         self.device = torch.device(device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
         self.positions = element_positions(self.runtime["mesh_inv"]).astype(np.float32)
         self.checkpoints = []
@@ -189,7 +226,12 @@ class CoordinateReconstructor:
             if not checkpoint.get("use_coordinates", False):
                 raise ValueError("coordinate family checkpoint does not enable coordinates")
             contract = checkpoint["physics_contract"]
-            _validate_physics_hashes(contract, self.cfg, self.config_path)
+            _validate_physics_hashes(
+                contract,
+                self.cfg,
+                self.config_path,
+                allow_config_hash_mismatch=allow_config_hash_mismatch,
+            )
             if contract.get("baseline_mode") != "homogeneous" or not np.isclose(
                 float(contract.get("baseline_conductivity", np.nan)), 0.7
             ):
@@ -207,8 +249,19 @@ class CoordinateReconstructor:
             self.checkpoints.append(checkpoint)
             self.models.append(model)
         self.baseline = np.full(self.mappings.num_elements, 0.7, dtype=np.float64)
+        if physics_mesh_mode == "projected_fine":
+            if self.mappings.c2f is None:
+                raise ValueError(
+                    "projected-fine reconstruction requires a coarse-to-fine mapping"
+                )
+            stage_physics = ProjectedFineMeshPhysics(
+                self.runtime["physics_fwd"], self.mappings.c2f
+            )
+        else:
+            stage_physics = self.runtime["physics_inv"]
+        self.stage_physics = stage_physics
         self.fixed_stage = FixedZeroCurrentLMSolver(
-            self.runtime["physics_inv"],
+            stage_physics,
             self.baseline,
             regularizer=self.mappings.laplace,
             hyper_pvi=self.cfg.hyper_pvi,
@@ -221,7 +274,7 @@ class CoordinateReconstructor:
             hyper_pvi=self.cfg.hyper_pvi,
             lambda_lm=self.cfg.lambda_lm,
         )
-        self.parallel_physics = _ParallelPhysics(self.runtime["physics_inv"])
+        self.parallel_physics = _ParallelPhysics(stage_physics)
 
     @property
     def mappings(self):
@@ -303,7 +356,7 @@ class CoordinateReconstructor:
         baseline_voltages = None
         for checkpoint, model in zip(self.checkpoints, self.models):
             direction, _, baseline_voltages = dataset_lm_directions(
-                self.runtime["physics_inv"], baseline, current, measured,
+                self.stage_physics, baseline, current, measured,
                 regularizer=self.mappings.laplace,
                 hyper_pvi=self.cfg.hyper_pvi, lambda_lm=self.cfg.lambda_lm,
                 step_size=self.cfg.lm_step_size,
@@ -318,7 +371,7 @@ class CoordinateReconstructor:
             )
             current = _predict(model, graphs, float(checkpoint["scale"]))
             stage_residual, baseline_voltages, _ = dataset_voltage_residual_rms(
-                self.runtime["physics_inv"], baseline, current, measured,
+                self.stage_physics, baseline, current, measured,
                 minimum_conductivity=float(checkpoint["physics_contract"].get("minimum_conductivity", 1e-4)),
                 baseline_voltages=baseline_voltages,
             )

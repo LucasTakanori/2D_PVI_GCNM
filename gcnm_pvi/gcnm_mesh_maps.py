@@ -60,6 +60,56 @@ class MeshMappings:
             return flat.reshape(n, n, order="F")
         return flat.reshape(n, n, flat.shape[1], order="F")
 
+    def categorical_to_image_grid(
+        self,
+        labels_elem: np.ndarray,
+        *,
+        num_classes: int | None = None,
+        background_label: int = 0,
+    ) -> np.ndarray:
+        """Rasterize element labels by maximum overlap instead of label averaging.
+
+        ``m2i`` is an area-weighted linear map and is therefore appropriate for
+        continuous conductivity.  Applying it directly to integer class IDs can
+        invent a third class at a boundary.  For example, averaging muscle label
+        3 and ligament label 5 can round to cortical-bone label 4.  This method
+        maps one binary mask per class and assigns each pixel the class with the
+        greatest mapped coverage.
+        """
+
+        labels = np.asarray(labels_elem)
+        if labels.ndim != 1 or labels.shape[0] != self.num_elements:
+            raise ValueError(
+                f"categorical labels must have shape ({self.num_elements},), "
+                f"received {labels.shape}"
+            )
+        if not np.issubdtype(labels.dtype, np.integer):
+            raise TypeError("categorical labels must use an integer dtype")
+        if np.any(labels < 0):
+            raise ValueError("categorical labels must be nonnegative")
+        inferred_classes = int(labels.max(initial=0)) + 1
+        class_count = inferred_classes if num_classes is None else int(num_classes)
+        if class_count < inferred_classes or class_count < 1:
+            raise ValueError(
+                f"num_classes={class_count} cannot represent labels through "
+                f"{inferred_classes - 1}"
+            )
+        if not 0 <= background_label < class_count:
+            raise ValueError("background_label must identify one represented class")
+
+        coverage = np.column_stack(
+            [
+                np.asarray(
+                    self.m2i @ (labels == class_id).astype(np.float64)
+                ).ravel()
+                for class_id in range(class_count)
+            ]
+        )
+        coverage = np.nan_to_num(coverage, nan=0.0, posinf=0.0, neginf=0.0)
+        flat = np.argmax(coverage, axis=1).astype(labels.dtype, copy=False)
+        flat[np.sum(coverage, axis=1) <= 0] = background_label
+        return flat.reshape(self.img_size, self.img_size, order="F")
+
     def rtr(self) -> np.ndarray:
         """Regularization matrix R^T R on inverse mesh elements."""
         R = self.laplace

@@ -1,0 +1,608 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\title{Draft of Supplementary Discussion 6.7:\\
+Graph-Convolutional Newton-Type Reconstruction for PVI}
+\author{Hyeuknam Kwon}
+\date{}
+
+\newcommand{\R}{\mathbb{R}}
+\setcounter{secnumdepth}{4}
+
+\begin{document}
+
+\section*{Main Manuscript}
+\begingroup
+To improve differential PVI reconstruction, we incorporated a two-stage graph-convolutional Newton-type method (GCNM) \cite{Herzberg2021GCNM}.
+At each stage, the nonlinear differential forward solution, voltage residual, Jacobian, and regularized physics-based update were recomputed from the current conductivity estimate.
+The current estimate and its corresponding physics-based update were then used as node features on a graph defined over the reconstruction mesh, and a stage-specific GCN produced the conductivity estimate for the next stage.
+The two GCN blocks were trained sequentially with independent parameters, so the second stage used physics-based quantities recomputed from the first-stage reconstruction.
+The complete formulation and training procedure are described in Supplementary Discussion~6.7.
+
+
+Because conductivity ground truth was not available for the experimental recordings, we generated a separate synthetic dataset for each ring geometry.
+The simulated finger cross-sections contained the principal tissue compartments and two independently varying digital arteries, with variation in finger geometry, tissue conductivity, artery geometry and position, pulse morphology, and measurement conditions.
+For every synthetic sample, we evaluated the conductivity field on a fine forward mesh and simulated the corresponding eight-electrode voltages, while using a distinct coarser mesh for the reconstruction target.
+Each ring-specific dataset contained 200 virtual anatomies divided into independent training, validation, and test partitions before the beats and samples were generated.
+We trained the two graph convolutional networks sequentially using the synthetic conductivity targets and voltages.
+After selecting the first-stage network, we used its reconstructions to recompute the nonlinear forward solution, residual, Jacobian, and physics-based update before training the independently parameterized second-stage network.
+The complete formulation and training procedure are described in Supplementary Discussion~6.7.
+\endgroup
+
+\newpage
+
+\setcounter{section}{6}
+\setcounter{subsection}{6}
+\setcounter{equation}{16}
+\subsection{Graph-convolutional Newton-type reconstruction}
+\label{sec:pvi_gcnm}
+
+\begingroup
+
+% Numbered equations continue provisionally from equation (16) in the supplied
+% Section 6 text. Supporting equations that are not cited remain unnumbered.
+
+We extended the one-step differential inverse solver described in Supplementary Discussion~6.3 using a graph-convolutional Newton-type method (GCNM) \cite{Herzberg2021GCNM}.
+The conventional inverse solver computes one conductivity update using a Jacobian evaluated at the homogeneous baseline.
+In contrast, the PVI-GCNM consisted of two reconstruction stages that combined a newly evaluated physics-based update with a learned graph-convolutional mapping.
+For the GCNM implementation, we fixed the homogeneous baseline conductivity introduced in Supplementary Discussion~6.3 at $\sigma_0=0.7~\mathrm{S/m}$ for all ring-specific models.
+
+\subsubsection{Stage-wise physics-based update}
+
+We indexed the two reconstruction stages by $n=0,1$ and initialized the differential conductivity as $\Delta\sigma_0=0$.
+At each stage, the current conductivity passed to the forward solver was
+\begin{equation}
+    \sigma_n
+    =
+    \max\!\left(
+        \sigma_0\mathbf{1}+\Delta\sigma_n,\,
+        \sigma_{\min}\mathbf{1}
+    \right),
+    \qquad
+    \sigma_{\min}=10^{-4}~\mathrm{S/m}.
+\label{eq:gcnm-stage-conductivity}
+\end{equation}
+Here, the maximum was applied elementwise, and the fixed lower bound $\sigma_{\min}$ prevented zero or negative conductivity values from entering the nonlinear forward solver.
+Using the stage conductivity in equation~\eqref{eq:gcnm-stage-conductivity}, the full nonlinear differential forward solution was recomputed with the forward operator $F$ in equation~(11):
+\begin{equation*}
+    \widehat{\Delta V}_n
+    =
+    F\!\left(\sigma_n\right)
+    -F\!\left(\sigma_0\mathbf{1}\right).
+\end{equation*}
+The voltage residual was
+\begin{equation*}
+    r_n
+    =
+    \widehat{\Delta V}_n
+    -\Delta V.
+\end{equation*}
+The Jacobian $J_n$ was recomputed at $\sigma_n$ rather than being fixed across the two stages.
+Using the fine-mesh Laplacian $L$ and the coarse-to-fine mapping $P$ from Supplementary Discussion~6.1, the projected regularization matrix on the reconstruction mesh was
+\begin{equation}
+    R_{\mathrm{PVI}}
+    =
+    \frac{1}{2}
+    P^{\mathsf T}LP.
+\label{eq:gcnm-projected-regularization}
+\end{equation}
+This is the regularization matrix stored and used by the implemented PVI inverse solver.
+It was used directly and was not multiplied by its transpose again.
+Using the regularization matrix in equation~\eqref{eq:gcnm-projected-regularization}, the physics-based update $p_n$ for the selected model was obtained by solving
+\begin{equation}
+    \left(
+        J_n^{\mathsf T}J_n
+        +\lambda^2R_{\mathrm{PVI}}
+    \right)p_n
+    =
+    -J_n^{\mathsf T}r_n.
+\label{eq:gcnm-physics-update}
+\end{equation}
+We used $\lambda=5\times10^{-4}$.
+We did not include a separate Levenberg Marquardt damping term of the form $\lambda_{\mathrm{LM}}I$ because the GCNM physics-based update retained the PVI inverse formulation in equation~(13), which uses Laplacian regularization without additional identity damping.
+Thus, $\lambda$ controls the spatial regularization imposed by $R_{\mathrm{PVI}}$ and is not a Levenberg Marquardt damping parameter.
+No additional step-size multiplier was applied.
+
+\subsubsection{Graph-convolutional reconstruction}
+
+Each of the $N_K$ triangles in the reconstruction mesh was treated as one graph node.
+Two graph nodes were connected when the corresponding triangles shared at least one finite element mesh node.
+Let $G$ denote the graph constructed using this edge rule, and let $A_G$ denote its binary adjacency matrix.
+The adjacency matrix with self-connections and its corresponding degree matrix were defined by
+\begin{equation*}
+    \widetilde A_G
+    =
+    A_G+I,
+    \qquad
+    \widetilde D_G
+    =
+    \operatorname{diag}\!\left(\sum_j \widetilde A_{G,ij}\right).
+\end{equation*}
+
+Let $c_i\in\R^2$ be the centroid of reconstruction-mesh element $i$, let $c_0$ denote the domain center, and let $\rho$ denote the domain radius.
+The dimensionless coordinate features for element $i$ were defined as
+\begin{equation*}
+    C_i
+    =
+    \left[
+        \bar x_i,\,
+        \bar y_i,\,
+        \bar r_i
+    \right],
+    \qquad
+    (\bar x_i,\bar y_i)
+    =
+    \frac{c_i-c_0}{\rho},
+    \qquad
+    \bar r_i
+    =
+    \sqrt{\bar x_i^2+\bar y_i^2}.
+\end{equation*}
+The conductivity scale $s$ was fixed from the $99.5$th percentile of the absolute training targets.
+The input features at stage $n$ were the normalized current differential conductivity estimate, the normalized physics-based update, and the coordinate features:
+\begin{equation*}
+    H_n
+    =
+    \left[
+        \frac{\Delta\sigma_n}{s},\,
+        \frac{p_n}{s},\,
+        C
+    \right].
+\end{equation*}
+
+The graph-convolutional layer used in this study was defined as
+\begin{equation*}
+H_n^{(\ell+1)}
+=
+g_\ell\!\left(
+\widetilde D_G^{-1/2}
+\widetilde A_G
+\widetilde D_G^{-1/2}
+H_n^{(\ell)}
+W_n^{(\ell)}
++
+\mathbf{1}\bigl(b_n^{(\ell)}\bigr)^{\mathsf T}
+\right),
+\qquad
+H_n^{(0)}=H_n.
+\end{equation*}
+Here, \(W_n^{(\ell)}\in\mathbb{R}^{F_\ell\times F_{\ell+1}}\) and \(b_n^{(\ell)}\in\mathbb{R}^{F_{\ell+1}}\) are trainable parameters, and \(g_\ell\) is the layer activation.
+Thus, \(\mathbf{1}\bigl(b_n^{(\ell)}\bigr)^{\mathsf T}\) applies the same bias vector to every graph node.
+Each stage-specific GCN contained three hidden graph-convolutional layers with 64 channels and ReLU activations, followed by a one-channel graph-convolutional layer with linear activation.
+Let \(\theta_n\) denote the collection of trainable parameters in the \(n\)-th GCN block.
+The two stages used independent parameter sets \(\theta_0\) and \(\theta_1\).
+The one-channel output was normalized during training and was multiplied by $s$ to restore conductivity units.
+For compact notation, $\operatorname{GCN}_{\theta_n}$ denotes the complete stage-specific mapping, including this rescaling.
+The output of each block directly represented the differential conductivity estimate for the next stage:
+\begin{equation}
+    \Delta\sigma_{n+1}
+    =
+    \operatorname{GCN}_{\theta_n}\!\left(H_n,G\right),
+    \qquad
+    n=0,1.
+\label{eq:gcnm-stage-output}
+\end{equation}
+The GCN output in equation~\eqref{eq:gcnm-stage-output} was used directly as the next iterate rather than being added to the current iterate as a residual correction.
+The output of the second GCN stage was used as the final reported reconstruction:
+\begin{equation*}
+    \Delta\sigma_{\mathrm{GCNM}}
+    =
+    \Delta\sigma_2.
+\end{equation*}
+
+
+\subsubsection{GCNM training}
+\label{sec:gcnm-training}
+
+\begingroup
+
+We describe the development of the ring-specific GCNMs in the order in which the training pipeline was constructed and evaluated.
+We first explain how the synthetic conductivity and voltage data were generated for each ring geometry and how the training simulations were verified against exact nonlinear forward solutions.
+We then describe the training of the two GCNM stages and the controlled comparisons used to select the output formulation, coordinate inputs, and loss coefficients $\alpha$ and $\beta$.
+Finally, we define the training loss and the validation metrics used to select the checkpoint for each stage,
+
+\paragraph{Synthetic data generation}
+\label{sec:gcnm-synthetic-data}
+\mbox{}\par
+
+Direct conductivity ground truth was not available for the experimental PVI recordings.
+We therefore generated a separate synthetic training corpus for each ring geometry represented in the study, preserving the principal anatomical and temporal structures expected in a finger cross-section while exposing the reconstruction model to variation in anatomy, tissue conductivity, vascular position, pulse morphology, and measurement conditions.
+
+Each virtual anatomy contained skin, subcutaneous fat, muscle, cortical bone and marrow, ligaments, artery walls, and two blood-filled arteries.
+Within this anatomy, the two arteries were represented independently so that their positions, dimensions, orientations, pulse amplitudes, and spatial diffusion into the surrounding muscle could vary between anatomies.
+\begingroup
+The nominal resting conductivities were taken at $50~\mathrm{kHz}$ from the public IT'IS Tissue Properties Database distributed for Sim4Life \cite{ITIS2024}.
+The values were $0.000273~\mathrm{S/m}$ for dry skin, $0.0433~\mathrm{S/m}$ for fat, $0.352~\mathrm{S/m}$ for muscle, $0.0206~\mathrm{S/m}$ for cortical bone, $0.00363~\mathrm{S/m}$ for bone marrow, $0.388~\mathrm{S/m}$ for ligament and tendon, $0.317~\mathrm{S/m}$ for the artery wall, and $0.701~\mathrm{S/m}$ for blood.
+These heterogeneous values defined the resting conductivity of each synthetic anatomy and were distinct from the homogeneous $0.7~\mathrm{S/m}$ baseline used by the inverse solver.
+\endgroup
+Starting from the reference finger model, finger size was varied by up to $15\%$, finger rotation by up to $20^\circ$, and finger position within the ring by up to $1~\mathrm{mm}$ in each spatial direction, while artery size was varied by up to $35\%$, artery position by up to $1.8~\mathrm{mm}$, and artery rotation by up to $30^\circ$.
+Tissue conductivities were additionally varied by up to $20\%$, the spatial diffusion surrounding the arteries by up to $75\%$, the pulse-waveform shape by up to $20\%$, and beat duration by up to $15\%$.
+These perturbations were drawn independently for each virtual anatomy while retaining the anatomical tissue arrangement and two-artery structure of the reference model.
+
+Let $a$ index a virtual anatomy and $t$ index a temporal sample, and let the superscript $\mathrm f$ identify the fine-mesh conductivity used by the forward solver.
+The time-varying conductivity was constructed as
+\begin{equation}
+    \sigma^{\mathrm f}_{a,t}
+    =
+    \sigma^{\mathrm f}_{a,\mathrm{rest}}
+    +\delta\sigma^{\mathrm f,\mathrm{pulse}}_{a,t}
+    +\delta\sigma^{\mathrm f,\mathrm{vascular}}_{a,t}
+    +\delta\sigma^{\mathrm f,\mathrm{muscle}}_{a,t}.
+\label{eq:gcnm-synthetic-conductivity}
+\end{equation}
+The pulsatile term in equation~\eqref{eq:gcnm-synthetic-conductivity} described the conductivity change produced by the two arteries over a cardiac cycle.
+Seven consecutive 50-sample beats were simulated for each anatomy, with the amplitude of each beat independently multiplied by a factor drawn between 0.70 and 1.30 and with additional perturbations of its morphology and duration.
+Across the resulting continuous sequence, the vascular term introduced a smooth baseline variation with an amplitude of up to $30\%$ of the peak pulsatile vascular change, while the muscle term comprised one to three weak, smoothly varying conductivity regions confined to the simulated muscle tissue, with a maximum amplitude of $0.006~\mathrm{S/m}$.
+The combination of these terms prevented all temporal conductivity changes from being represented as identical scaled copies of the arterial pulse.
+
+The first and seventh beats provided temporal padding for the 100-sample moving-mean decomposition.
+For any continuous conductivity or voltage sequence $X_t$, let $\mathcal M_{100}(X)_t$ denote its 100-sample moving mean and let $t_{\mathrm{ref}}$ denote the first sample of the retained sequence.
+The stored low-pass and high-pass audit components were
+\begin{subequations}
+\label{eq:gcnm-temporal-components}
+\begin{align}
+    X^{\mathrm{LP}}_t
+    &=
+    \mathcal M_{100}(X)_t-\mathcal M_{100}(X)_{t_{\mathrm{ref}}},
+    \label{eq:gcnm-low-pass}\\
+    X^{\mathrm{HP}}_t
+    &=
+    X_t-\mathcal M_{100}(X)_t
+    -X_{t_{\mathrm{ref}}}
+    +\mathcal M_{100}(X)_{t_{\mathrm{ref}}}.
+    \label{eq:gcnm-high-pass}
+\end{align}
+\end{subequations}
+Equations~\eqref{eq:gcnm-low-pass} and \eqref{eq:gcnm-high-pass} satisfy $X^{\mathrm{HP}}_t+X^{\mathrm{LP}}_t=X_t-X_{t_{\mathrm{ref}}}$.
+The two padding beats were discarded after filtering and temporal decomposition, leaving five beats and 250 samples per anatomy.
+This construction preserved complete pulse cycles while reducing boundary effects in the stored temporal components.
+
+For every sample, the anatomical conductivity field was first evaluated on a fine forward mesh.
+The corresponding eight-electrode voltages were then simulated using the skip-2 stimulation and skip-1 measurement patterns described in Supplementary Discussion~6.6.
+A distinct coarser inverse mesh was used to store the target conductivity and to train the GCNM.
+Using different forward and inverse meshes reduced the inverse crime that would arise if the same discretization were used to generate and reconstruct the measurements.
+To reduce the computational cost of generating the training data, we computed one exact resting forward solution and one Jacobian for each virtual anatomy and approximated its time-varying voltages using
+\begin{equation}
+    V^{\mathrm{lin}}_{a,t}
+    =
+    F\!\left(\sigma^{\mathrm f}_{a,\mathrm{rest}}\right)
+    +J_{a,\mathrm{rest}}
+    \left(
+        \sigma^{\mathrm f}_{a,t}
+        -\sigma^{\mathrm f}_{a,\mathrm{rest}}
+    \right).
+\label{eq:gcnm-linearized-voltage}
+\end{equation}
+The first-order approximation in equation~\eqref{eq:gcnm-linearized-voltage} retained the heterogeneous resting conductivity of the corresponding virtual anatomy and replaced an exact nonlinear forward solution at every training sample.
+Validation and test voltages were instead generated as $V^{\mathrm{nl}}_{a,t}=F(\sigma^{\mathrm f}_{a,t})$, allowing the linearized approximation to be evaluated on anatomies that were not used for training.
+After applying the same filtering and temporal decomposition to both solutions, the approximation error for each component $c\in\{\mathrm{full},\mathrm{HP},\mathrm{LP}\}$ was quantified by
+\begin{subequations}
+\label{eq:gcnm-linearization-metrics}
+\begin{align}
+    \operatorname{NRMSE}_{a,c}
+    &=
+    \frac{
+        \left\|
+            V^{\mathrm{lin}}_{a,c}
+            -V^{\mathrm{nl}}_{a,c}
+        \right\|_2
+    }{
+        \left\|V^{\mathrm{nl}}_{a,c}\right\|_2
+    },
+    \label{eq:gcnm-linearization-nrmse}\\
+    \rho_{a,c}
+    &=
+    \operatorname{corr}\!\left(
+        \operatorname{vec}\!\left(V^{\mathrm{lin}}_{a,c}\right),
+        \operatorname{vec}\!\left(V^{\mathrm{nl}}_{a,c}\right)
+    \right).
+    \label{eq:gcnm-linearization-correlation}
+\end{align}
+\end{subequations}
+Using the metrics in equations~\eqref{eq:gcnm-linearization-nrmse} and \eqref{eq:gcnm-linearization-correlation}, a ring-specific corpus was accepted only when $\max_a\operatorname{NRMSE}_{a,c}\leq0.50$ and $\operatorname{mean}_a\rho_{a,c}\geq0.80$ for every component in both held-out partitions.
+
+The simulator additionally generated channel gain, current gain, voltage offset, contact-drift, white-noise, correlated-noise, and transient-artifact variations.
+Both the augmented and clean voltage sequences were filtered using the third-order zero-phase $5~\mathrm{Hz}$ low-pass filter used in the PVI processing pipeline, and both views were retained so that acquisition robustness could be studied without regenerating the anatomies.
+
+Of the 19 ring meshes described in Supplementary Discussion~6.1, 15 were represented in the included cohort and were used for GCNM training.
+These meshes ranged from US060 to US130 in half-size increments.
+For each ring, 200 virtual anatomies were partitioned before beat and sample expansion into 160 training anatomies, 20 validation anatomies, and 20 test anatomies.
+Each anatomy contributed five retained beats.
+The resulting split contained 800 training beats, 100 validation beats, and 100 test beats per ring.
+Since each beat contained 50 ordered samples, this yielded 40,000 training samples, 5,000 validation samples, and 5,000 test samples per ring.
+No anatomy, beat, or sample was shared between the three partitions.
+
+
+\clearpage
+\color{black}
+
+\paragraph{Ring-specific training}
+\label{sec:gcnm-ring-training}
+\mbox{}\par
+
+One two-stage GCNM was trained for each of the 15 ring geometries.
+For a given ring, the conductivity targets and voltages were paired with the forward mesh, inverse mesh, graph, and projected Laplacian associated with that geometry, ensuring that its electrode arrangement, finite-element discretization, physics-based update, and graph connectivity remained consistent throughout training and reconstruction.
+The resulting 15 models contained 30 independently parameterized GCN blocks and each model was applied only to participants measured with its corresponding ring geometry.
+
+Training followed the sequential procedure defined above.
+For each ring, the first block was fitted using 40,000 samples and its checkpoint was selected on the independent 5,000-sample validation partition.
+After freezing this checkpoint, we reconstructed the training and validation samples and recomputed the nonlinear forward solution, residual, Jacobian, and physics-based update from each first-stage output.
+These recomputed quantities formed the inputs used to fit and select the second block, while the 5,000 exact nonlinear test samples remained excluded from parameter optimization and checkpoint selection.
+
+Both blocks were optimized with Adam using an initial learning rate of $10^{-3}$ and batches of 512 graphs.
+Training was limited to 150 epochs and stopped when the validation selection score did not improve for 30 consecutive epochs, with the random seed fixed at zero.
+All ring-specific models used the same direct-output formulation, coordinate features, target and background weighting, and three hidden graph layers with 64 channels.
+
+Before training all ring-specific models, we selected the architecture and loss coefficients in a controlled ring size 12.0 pilot shown in Supplementary Fig.~24.
+This plot compared different GCN architectures and parameters across different metrics like the inclusion of element coordinates, target-magnitude weighting, and background weighting.
+The selected formulation used the direct output with coordinates, $\alpha=1$, and $\beta=0.25$, while the Laplacian regularization parameter $\lambda=5\times10^{-4}$ and the 64-channel hidden width were held fixed rather than exhaustively optimized.
+
+We compared the conventional Newton reconstruction and both GCNM stages with the known conductivity target on a standardized exact nonlinear visualization set containing three complete beats from each test anatomy for each ring.
+Across the 15 ring sizes, the median NRMSE was $4.72$ for Newton, $1.12$ for the first GCNM stage, and $1.12$ for the second stage.
+The corresponding median spatial correlations were $-0.013$, $-0.090$, and $-0.075$.
+Visual inspection of Supplementary Fig.~25 showed that the GCNM stages recovered two spatially distinct regions corresponding to the synthetic arterial targets.
+Relative to the first stage, the second stage provided a small aggregate improvement, with the mean NRMSE decreasing from $1.20$ to $1.19$ and the mean spatial correlation increasing from $-0.060$ to $-0.053$ across the 15 ring sizes.
+Although this improvement was marginal, it indicates that recomputing the physics-based quantities after the first-stage reconstruction can provide additional refinement.
+The usefulness of this second stage and of further reconstruction stages should be investigated in future work.
+
+After reconstruction, the GCNM outputs were rasterized on the $40\times40$ grid defined in Supplementary Discussion~6.1.
+Because direct conductivity ground truth was unavailable for the experimental recordings, their temporal behavior was compared qualitatively in the participant atlas shown in Supplementary Fig.~26.
+The first complete 50-sample beat in a predefined evaluation segment for each participant will be used to avoid selecting examples according to their visual appearance.
+Five approximately equally spaced samples with indices $1$, $10$, $20$, $30$, $40$ and $50$ will span the beat from its first to its final sample.
+Spatial orientation, image extent, sample index, and conductivity units will be identical between the two rows.
+A common color scale will be used across all patients and all five samples so that changes in amplitude and spatial concentration remain directly comparable.
+
+\paragraph{Sequential training}
+\label{sec:gcnm-sequential-training}
+
+The two GCN blocks were trained sequentially rather than end-to-end.
+After the first stage was trained, its output was used to recompute the nonlinear differential forward solution, residual, Jacobian, and physics-based update in equation~\eqref{eq:gcnm-physics-update} before training the second stage.
+To define the implemented objective, let a mini-batch contain $Q$ graphs indexed by $q$, with the $N_K$ mesh elements in each graph indexed by $i$.
+The normalized target and prediction were
+\begin{equation*}
+    y_{q,i}
+    =
+    \frac{\Delta\sigma^{*}_{q,i}}{s},
+    \qquad
+    \widehat y_{q,i}
+    =
+    \frac{1}{s}
+    \left[
+        \operatorname{GCN}_{\theta_n}\!\left(H_{n,q},G\right)
+    \right]_i.
+\end{equation*}
+Here, $y_{q,i}$ is the normalized target differential conductivity for element $i$ in graph $q$, $\widehat y_{q,i}$ is the corresponding normalized GCN prediction, $\Delta\sigma^{*}_{q,i}$ is the target differential conductivity before normalization, and $s$ is the conductivity scale defined above.
+For each graph, the reference target magnitude was
+\begin{equation*}
+    m_q
+    =
+    \underset{j:\,|y_{q,j}|>0}{\operatorname{median}}
+    |y_{q,j}|.
+\end{equation*}
+Here, $m_q$ is the median magnitude of the nonzero normalized target elements in graph $q$.
+If a graph contained no nonzero target element, the implementation set $m_q=1$.
+The elementwise weight was
+\begin{equation*}
+    w_{q,i}
+    =
+    1+\alpha\,
+    \operatorname{clip}\!\left(
+        \frac{|y_{q,i}|}{\max(m_q,\varepsilon)},\,0,\,2
+    \right),
+    \qquad
+    \varepsilon=10^{-8}.
+\end{equation*}
+Here, $w_{q,i}$ is the target-dependent weight for element $i$, $\alpha$ controls the additional weight assigned to nonzero and higher-magnitude target elements, and $\varepsilon$ is the numerical threshold used to identify target-background elements.
+The target-background set for graph $q$ was
+\begin{equation*}
+    \mathcal B_q
+    =
+    \left\{i:\ |y_{q,i}|\leq\varepsilon\right\}.
+\end{equation*}
+Here, $\mathcal B_q$ contains the mesh elements whose normalized target magnitude did not exceed $\varepsilon$.
+The loss minimized at each stage was
+\begingroup
+\small
+\begin{equation}
+    \mathcal L_n(\theta_n)
+    =
+    \frac{1}{QN_K}\sum_{q=1}^{Q}\sum_{i=1}^{N_K}
+    w_{q,i}\left(\widehat y_{q,i}-y_{q,i}\right)^2
+    +
+    \frac{\beta}{\sum_{q=1}^{Q}|\mathcal B_q|}
+    \sum_{q=1}^{Q}\sum_{i\in\mathcal B_q}
+    \left(\widehat y_{q,i}-y_{q,i}\right)^2.
+\label{eq:gcnm-training-loss}
+\end{equation}
+\endgroup
+\begin{equation*}
+    \alpha=1,
+    \qquad
+    \beta=0.25.
+\end{equation*}
+The first term is the target-weighted mean squared error over all $QN_K$ mesh elements.
+The second term is the mean squared error over the target-background sets, and $\beta$ controls its contribution to the total loss.
+The loss in equation~\eqref{eq:gcnm-training-loss} and the same coefficients were used for both stages.
+Both GCNs were optimized with Adam (initial learning rate $10^{-3}$), and their parameters were selected independently.
+The saved validation checkpoint minimized the composite score
+\begin{equation}
+    S_{\mathrm{val}}
+    =
+    \operatorname{NRMSE}_{\mathrm{val}}
+    +
+    \operatorname{RMS}_{\mathrm{background,val}}
+    -
+    0.25\,\operatorname{Dice}_{\mathrm{support,val}}.
+\label{eq:gcnm-validation-score}
+\end{equation}
+To define the three terms in equation~\eqref{eq:gcnm-validation-score} explicitly, let $Q_{\mathrm{val}}$ be the number of graphs in the validation partition and let $\widehat y_{q,i}$ denote the normalized prediction from the checkpoint being evaluated.
+For each validation graph, the target support, its cardinality, and the equal-cardinality predicted support were
+\begin{equation*}
+    \mathcal S_q
+    =
+    \left\{i:\ |y_{q,i}|>\varepsilon\right\}
+    =
+    \left\{1,\ldots,N_K\right\}\setminus\mathcal B_q,
+    \qquad
+    K_q=|\mathcal S_q|,
+    \qquad
+    \widehat{\mathcal S}_q
+    =
+    \operatorname{TopK}_{K_q}
+    \left(\left\{|\widehat y_{q,i}|\right\}_{i=1}^{N_K}\right),
+\end{equation*}
+where $\operatorname{TopK}_{K_q}$ returns the indices of the $K_q$ largest absolute predicted values.
+Let $\mathcal V_{+}=\{q:\ K_q>0\}$ denote the validation graphs having nonempty target support.
+The implemented validation metrics were
+\begin{subequations}
+\label{eq:gcnm-validation-metrics}
+\begin{align}
+    \operatorname{NRMSE}_{\mathrm{val}}
+    &=
+    \frac{
+        \left[
+            \dfrac{1}{Q_{\mathrm{val}}N_K}
+            \sum_{q=1}^{Q_{\mathrm{val}}}
+            \sum_{i=1}^{N_K}
+            \left(\widehat y_{q,i}-y_{q,i}\right)^2
+        \right]^{1/2}
+    }{
+        \max\!\left(
+            \left[
+                \dfrac{1}{Q_{\mathrm{val}}N_K}
+                \sum_{q=1}^{Q_{\mathrm{val}}}
+                \sum_{i=1}^{N_K}
+                y_{q,i}^{\,2}
+            \right]^{1/2},
+            10^{-12}
+        \right)
+    },
+    \label{eq:gcnm-validation-nrmse}\\
+    \operatorname{RMS}_{\mathrm{background,val}}
+    &=
+    \left[
+        \frac{
+            \displaystyle
+            \sum_{q=1}^{Q_{\mathrm{val}}}
+            \sum_{i\in\mathcal B_q}
+            \left(\widehat y_{q,i}-y_{q,i}\right)^2
+        }{
+            \displaystyle
+            \sum_{q=1}^{Q_{\mathrm{val}}}|\mathcal B_q|
+        }
+    \right]^{1/2},
+    \label{eq:gcnm-validation-background-rms}\\
+    \operatorname{Dice}_{\mathrm{support,val}}
+    &=
+    \frac{1}{|\mathcal V_{+}|}
+    \sum_{q\in\mathcal V_{+}}
+    \frac{
+        2\left|\mathcal S_q\cap\widehat{\mathcal S}_q\right|
+    }{
+        |\mathcal S_q|+|\widehat{\mathcal S}_q|
+    }
+    =
+    \frac{1}{|\mathcal V_{+}|}
+    \sum_{q\in\mathcal V_{+}}
+    \frac{
+        \left|\mathcal S_q\cap\widehat{\mathcal S}_q\right|
+    }{
+        K_q
+    }.
+    \label{eq:gcnm-validation-support-dice}
+\end{align}
+\end{subequations}
+The NRMSE and background RMS were calculated after concatenating all validation elements, whereas the support Dice was calculated separately for each graph and then averaged over graphs with nonempty support.
+The final equality in equation~\eqref{eq:gcnm-validation-support-dice} follows because $|\widehat{\mathcal S}_q|=|\mathcal S_q|=K_q$.
+All quantities in equations~\eqref{eq:gcnm-validation-metrics} used the normalized targets and predictions; consequently, the background RMS was dimensionless and could be combined directly with the NRMSE and Dice in equation~\eqref{eq:gcnm-validation-score}.
+The validation score in equation~\eqref{eq:gcnm-validation-score} was used only for checkpoint selection and was not an additional differentiable training-loss term.
+
+
+\clearpage
+\begingroup
+\color{black}
+
+\begin{figure}[p]
+    \centering
+    \textbf{Supplementary Fig.~24. Controlled ring-size-12 architecture and loss ablation.}\par
+    \smallskip
+    \begin{minipage}{0.94\textwidth}
+        \small
+        Comparison between different GCNM model configurations using multiple performance metrics.
+        Blue identifies the GCNM input or output formulation, including direct, residual, and
+        coordinate-augmented configurations. Orange identifies the value of the $\alpha$ target-weighting
+        coefficient, and green identifies the background-weighting coefficient $\beta$. The selected
+        configuration used the direct coordinate formulation with $\alpha=1$ and $\beta=0.25$.
+    \end{minipage}\par
+    \vspace{0.8em}
+    \includegraphics[
+        width=0.98\textwidth,
+        height=0.70\textheight,
+        keepaspectratio
+    ]{figures/fig2_final.png}
+\end{figure}
+
+\clearpage
+\begin{figure}[p]
+    \centering
+    \textbf{Supplementary Fig.~25. Ground-truth simulated graph-convolutional-network finger-image reconstructions.}\par
+    \smallskip
+    \begin{minipage}{0.94\textwidth}
+        \small
+        Synthetic examples from ring meshes of sizes 6 through 13, each with a different virtual finger
+        anatomy, are shown with the corresponding ground-truth and second-stage GCNM conductivity
+        reconstructions at time instants $t_i$ within one beat, with $i=1,2,\ldots,50$. the time sample within a beat period. 
+    \end{minipage}\par
+    \vspace{0.8em}
+    \includegraphics[
+        width=0.98\textwidth,
+        height=0.70\textheight,
+        keepaspectratio
+    ]{figures/fig1_final.png}
+\end{figure}
+
+\clearpage
+\begin{figure}[p]
+    \centering
+    \textbf{Supplementary Fig.~26. Finger conductivity image reconstruction with a graph convolutional network.}\par
+    \smallskip
+    \begin{minipage}{0.94\textwidth}
+        \small
+        Participant-level temporal progression of second-stage GCNM reconstructions
+        at six samples spanning one complete beat. The same spatial orientation, image extent, sample
+        indices, conductivity units, and participant-specific color scale are used for both methods.
+    \end{minipage}\par
+    \vspace{0.8em}
+    \includegraphics[
+        width=0.90\textwidth,
+        height=0.72\textheight,
+        keepaspectratio
+    ]{figures/fig3_final.png}
+\end{figure}
+
+\endgroup
+\clearpage
+
+\endgroup
+
+\endgroup
+
+\begin{thebibliography}{9}
+
+\bibitem{Herzberg2021GCNM}
+W.~Herzberg, D.~B. Rowe, A.~Hauptmann, and S.~J. Hamilton, ``Graph convolutional networks for model-based learning in nonlinear inverse problems,'' \emph{IEEE Transactions on Computational Imaging}, vol.~7, pp.~1341\textendash 1353, 2021.
+
+\bibitem{ITIS2024}
+C.~Baumgartner, P.~A. Hasgall, F.~Di Gennaro, E.~Neufeld, B.~Lloyd, M.~C. Gosselin, D.~Payne, A.~Klingenb\"ock, and N.~Kuster, ``IT'IS Database for Thermal and Electromagnetic Parameters of Biological Tissues,'' version~4.2, IT'IS Foundation, 2024, doi: 10.13099/VIP21000-04-2.
+
+\end{thebibliography}
+
+\end{document}
+

@@ -56,25 +56,27 @@ def _ordered_test_rows(coordinate_root: Path, subject: str, split_manifest: Path
     import pyarrow.dataset as pads
 
     assignments = json.loads(Path(split_manifest).read_text(encoding="utf-8"))["assignments"]
+    metadata_columns = [
+        "sample_id",
+        "subject",
+        "session",
+        "source_name",
+        "mask_start",
+        "mask_stop",
+    ]
     table = pads.dataset(
         str(Path(coordinate_root) / "shards"), format="parquet"
-    ).to_table(filter=pads.field("subject") == subject.lower()).sort_by(
+    ).to_table(
+        filter=pads.field("subject") == subject.lower(),
+        columns=[*metadata_columns, "source_order"],
+    ).sort_by(
         [
             ("source_order", "ascending"),
             ("mask_start", "ascending"),
             ("mask_stop", "ascending"),
         ]
     )
-    rows = table.select(
-        [
-            "sample_id",
-            "subject",
-            "session",
-            "source_name",
-            "mask_start",
-            "mask_stop",
-        ]
-    ).to_pylist()
+    rows = table.select(metadata_columns).to_pylist()
     missing = [row["sample_id"] for row in rows if row["sample_id"] not in assignments]
     if missing:
         raise ValueError(f"split manifest omits {len(missing)} coordinate samples")
@@ -137,16 +139,43 @@ def normalize_bp_artifact_layout(artifact_main: Path, subject: str) -> None:
             pass
 
 
-def _read_one(root: Path, sample_id: str, columns: list[str]):
-    import pyarrow.dataset as pads
+def _read_one(
+    root: Path,
+    sample_id: str,
+    columns: list[str],
+    *,
+    shard_paths: list[str | Path] | None = None,
+):
+    """Read one image row without decoding every image column in the corpus."""
 
-    table = pads.dataset(str(Path(root) / "shards"), format="parquet").to_table(
-        filter=pads.field("sample_id") == sample_id,
-        columns=["sample_id", *columns],
+    import pyarrow.parquet as pq
+
+    root = Path(root)
+    paths = (
+        sorted((root / "shards").glob("*.parquet"))
+        if shard_paths is None
+        else [Path(path) for path in shard_paths]
     )
-    if table.num_rows != 1:
-        raise ValueError(f"expected one row for {sample_id} in {root}, got {table.num_rows}")
-    return table
+    if not paths:
+        raise FileNotFoundError(f"no Parquet shards found under {root}")
+    payload_columns = list(dict.fromkeys(["sample_id", *columns]))
+    for shard_path in paths:
+        parquet = pq.ParquetFile(shard_path)
+        for row_group in range(parquet.metadata.num_row_groups):
+            identifiers = parquet.read_row_group(
+                row_group, columns=["sample_id"]
+            )["sample_id"].to_pylist()
+            try:
+                row_index = identifiers.index(sample_id)
+            except ValueError:
+                continue
+            table = parquet.read_row_group(
+                row_group, columns=payload_columns
+            ).slice(row_index, 1)
+            if table["sample_id"][0].as_py() != sample_id:
+                raise RuntimeError(f"Parquet row identity changed for {sample_id}")
+            return table
+    raise ValueError(f"expected one row for {sample_id} in {root}, got 0")
 
 
 def _fixed_array(table, column: str, shape: tuple[int, ...]) -> np.ndarray:
@@ -297,8 +326,13 @@ def generate_bp_artifact_gifs(
     coordinate_manifest = json.loads(coordinate_manifest_path.read_text(encoding="utf-8"))
     if coordinate_manifest.get("schema") != "pvi-gcnm-coordinate-direct-parquet-v1":
         raise ValueError("artifact GIFs require coordinate-direct Parquet")
+    coordinate_source_by_name = {
+        str(row["source_name"]): row
+        for row in coordinate_manifest["source_sessions"]
+    }
     reference_manifest_path = None
-    source_by_name: dict[str, Path] = {}
+    reference_source_by_name: dict[str, dict] = {}
+    hdf5_source_by_name: dict[str, Path] = {}
     if reference_root is not None:
         reference_manifest_path = reference_root / "manifest.json"
         reference_manifest = json.loads(
@@ -309,9 +343,13 @@ def generate_bp_artifact_gifs(
             or reference_manifest.get("input_mode") != "img"
         ):
             raise ValueError("artifact GIFs require reference-image Parquet")
+        reference_source_by_name = {
+            str(row["source_name"]): row
+            for row in reference_manifest["source_sessions"]
+        }
     else:
         registry = json.loads(reference_registry.read_text(encoding="utf-8"))
-        source_by_name = {
+        hdf5_source_by_name = {
             str(row["source_name"]): Path(row["source_hdf5"])
             for row in registry["records"]
             if not row.get("exclusion_reason")
@@ -322,20 +360,32 @@ def generate_bp_artifact_gifs(
     reports = []
     for example in selected:
         sample_id = example["sample_id"]
-        coordinate = _read_one(coordinate_root, sample_id, ["s1", "s2", "bp_waveform"])
+        source_name = str(example["source_name"])
+        coordinate_record = coordinate_source_by_name.get(source_name)
+        if coordinate_record is None:
+            raise ValueError(f"coordinate manifest omits {source_name}")
+        coordinate = _read_one(
+            coordinate_root,
+            sample_id,
+            ["s1", "s2", "bp_waveform"],
+            shard_paths=coordinate_record["shards"],
+        )
         s1 = _fixed_array(coordinate, "s1", (1, 40, 40, 250))[0]
         s2 = _fixed_array(coordinate, "s2", (1, 40, 40, 250))[0]
         d_s2 = centered_temporal_difference(s2)
         coordinate_bp = _fixed_array(coordinate, "bp_waveform", (50,))
         if reference_root is not None:
             reference = _read_one(
-                reference_root, sample_id, ["pviHP", "pviLP", "bp_waveform"]
+                reference_root,
+                sample_id,
+                ["pviHP", "pviLP", "bp_waveform"],
+                shard_paths=reference_source_by_name[source_name]["shards"],
             )
             newton_hp = _fixed_array(reference, "pviHP", (1, 40, 40, 250))[0]
             newton_lp = _fixed_array(reference, "pviLP", (1, 40, 40, 250))[0]
             reference_bp = _fixed_array(reference, "bp_waveform", (50,))
         else:
-            source = source_by_name.get(str(example["source_name"]))
+            source = hdf5_source_by_name.get(source_name)
             if source is None:
                 raise ValueError(
                     f"HDF5 registry omits {example['source_name']}"

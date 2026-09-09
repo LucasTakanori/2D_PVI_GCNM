@@ -30,6 +30,7 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-coord-1000-${SLURM_JOB_ID}"
 DATA_ROOT="${DATA_ROOT:-${REPO_ROOT}/data/differential_US120_1000beats_clean_v1}"
 MODEL_ROOT="${MODEL_ROOT:-${REPO_ROOT}/models/differential_US120_1000beats_v1/coordinate_direct}"
 RESULT_ROOT="${RESULT_ROOT:-${REPO_ROOT}/data/differential_US120_1000beats_results_v1/coordinate_direct}"
+CONFIG="${CONFIG:-${REPO_ROOT}/configs/rings_b045/US120.yaml}"
 if [[ ! -f "${DATA_ROOT}/validation.json" || -e "${MODEL_ROOT}" || -e "${RESULT_ROOT}" ]]; then
   echo "validated 1,000-beat data is missing or immutable output already exists" >&2
   exit 2
@@ -38,7 +39,7 @@ fi
 echo "[$(date --iso-8601=seconds)] training coordinate-direct on 40,000 frames"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free,utilization.gpu --format=csv
 python -u -m gcnm_pvi.train_faithful_gcnm \
-  --config "${REPO_ROOT}/configs/rings_b045/US120.yaml" \
+  --config "${CONFIG}" \
   --train "${DATA_ROOT}/train.npz" --validation "${DATA_ROOT}/validation.npz" \
   --model-name coordinate_direct --models-dir "${MODEL_ROOT}" \
   --results-dir "${RESULT_ROOT}" \

@@ -31,21 +31,30 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/matplotlib-coord-parquet-${SLURM_JOB_ID}"
 MODEL_ROOT="${MODEL_ROOT:-${REPO_ROOT}/models/differential_US120_1000beats_v1/coordinate_direct}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/gcnm_parquet/subject006_coordinate_direct_s1_s2_ds2_v1}"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-${REPO_ROOT}/data/splits/us120_pilot_subject006_subject010_mask05_v1.json}"
+REGISTRY="${REGISTRY:-${REPO_ROOT}/data/registries/main_b045_v1.json}"
+RESUME="${RESUME:-0}"
 if [[ ! -f "${MODEL_ROOT}/coordinate_direct_0.pt" || ! -f "${MODEL_ROOT}/coordinate_direct_1.pt" ]]; then
   echo "coordinate-direct checkpoints are missing" >&2
   exit 2
 fi
-if [[ -e "${OUTPUT_ROOT}" ]]; then
+if [[ "${RESUME}" == 1 ]]; then
+  [[ -f "${OUTPUT_ROOT}/_INCOMPLETE" ]] || {
+    echo "resume requested without an incomplete output root: ${OUTPUT_ROOT}" >&2
+    exit 3
+  }
+elif [[ -e "${OUTPUT_ROOT}" ]]; then
   echo "immutable Parquet output already exists: ${OUTPUT_ROOT}" >&2
   exit 3
 fi
 
+RESUME_ARGS=()
+[[ "${RESUME}" == 1 ]] && RESUME_ARGS+=(--resume)
 echo "[$(date --iso-8601=seconds)] exporting all subject006 mask05 rows"
 python -u -m gcnm_pvi.export_coordinate_direct_parquet \
-  --registry "${REPO_ROOT}/data/registries/main_b045_v1.json" \
+  --registry "${REGISTRY}" \
   --checkpoint-dir "${MODEL_ROOT}" --model-name coordinate_direct \
   --output-root "${OUTPUT_ROOT}" --subjects subject006 \
-  --sessions baseline valsalva pressor \
+  --sessions baseline valsalva pressor "${RESUME_ARGS[@]}" \
   --session-workers 3 --physics-workers 20 --batch-rows 8
 python -u -m gcnm_pvi.validate_coordinate_direct_parquet \
   --root "${OUTPUT_ROOT}" --split-manifest "${SPLIT_MANIFEST}"

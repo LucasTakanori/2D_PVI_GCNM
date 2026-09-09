@@ -9,12 +9,68 @@ iterative-LM-only control using exactly the same physics.
 from __future__ import annotations
 
 import copy
+import multiprocessing as mp
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 from scipy import linalg, sparse
+
+
+_PROCESS_LM_STATE = None
+_PROCESS_RESIDUAL_STATE = None
+
+
+def _process_lm_lane(indices: np.ndarray):
+    """Fork-worker entry point using copy-on-write shared input arrays."""
+
+    if _PROCESS_LM_STATE is None:
+        raise RuntimeError("process LM worker was started without inherited state")
+    (
+        physics,
+        baselines,
+        currents,
+        measured,
+        regularizer,
+        hyper_pvi,
+        lambda_lm,
+        step_size,
+        minimum_conductivity,
+        cached,
+        system_solver,
+    ) = _PROCESS_LM_STATE
+    return dataset_lm_directions(
+        physics,
+        baselines[indices],
+        currents[indices],
+        measured[indices],
+        regularizer=regularizer,
+        hyper_pvi=hyper_pvi,
+        lambda_lm=lambda_lm,
+        step_size=step_size,
+        minimum_conductivity=minimum_conductivity,
+        baseline_voltages=None if cached is None else cached[indices],
+        system_solver=system_solver,
+    )
+
+
+def _process_residual_lane(indices: np.ndarray):
+    """Fork-worker entry point for nonlinear voltage residual evaluation."""
+
+    if _PROCESS_RESIDUAL_STATE is None:
+        raise RuntimeError("process residual worker was started without inherited state")
+    physics, baselines, currents, measured, minimum_conductivity, cached = (
+        _PROCESS_RESIDUAL_STATE
+    )
+    return dataset_voltage_residual_rms(
+        physics,
+        baselines[indices],
+        currents[indices],
+        measured[indices],
+        minimum_conductivity=minimum_conductivity,
+        baseline_voltages=None if cached is None else cached[indices],
+    )
 
 
 @dataclass(frozen=True)
@@ -592,6 +648,45 @@ def parallel_dataset_lm_directions(
             system_solver=system_solver,
         )
     parts = [part for part in np.array_split(np.arange(count), lanes) if len(part)]
+    executor_mode = os.environ.get("GCNM_PHYSICS_EXECUTOR", "thread").lower()
+    if executor_mode not in {"thread", "process"}:
+        raise ValueError("GCNM_PHYSICS_EXECUTOR must be 'thread' or 'process'")
+    cached = None if baseline_voltages is None else np.asarray(baseline_voltages)
+    if executor_mode == "process":
+        if "fork" not in mp.get_all_start_methods():
+            raise RuntimeError(
+                "process physics requires the POSIX fork start method"
+            )
+        global _PROCESS_LM_STATE
+        _PROCESS_LM_STATE = (
+            physics,
+            np.asarray(sigma_baseline),
+            np.asarray(delta_current),
+            np.asarray(delta_voltage_measured),
+            regularizer,
+            float(hyper_pvi),
+            float(lambda_lm),
+            float(step_size),
+            float(minimum_conductivity),
+            cached,
+            system_solver,
+        )
+        try:
+            with mp.get_context("fork").Pool(processes=len(parts)) as pool:
+                results = pool.map(_process_lm_lane, parts)
+        finally:
+            _PROCESS_LM_STATE = None
+        if progress_label:
+            print(
+                f"{progress_label}: physics {count}/{count} across "
+                f"{len(parts)} processes",
+                flush=True,
+            )
+        return (
+            np.concatenate([result[0] for result in results], axis=0),
+            [item for result in results for item in result[1]],
+            np.concatenate([result[2] for result in results], axis=0),
+        )
     physics_lanes = [physics, *(copy.deepcopy(physics) for _ in range(len(parts) - 1))]
     solver_lanes = (
         [None] * len(parts)
@@ -601,8 +696,6 @@ def parallel_dataset_lm_directions(
             *(copy.deepcopy(system_solver) for _ in range(len(parts) - 1)),
         ]
     )
-    cached = None if baseline_voltages is None else np.asarray(baseline_voltages)
-
     def run(lane: int, indices: np.ndarray):
         return dataset_lm_directions(
             physics_lanes[lane],
@@ -736,8 +829,35 @@ def parallel_dataset_voltage_residual_rms(
             baseline_voltages=baseline_voltages,
         )
     parts = [part for part in np.array_split(np.arange(count), lanes) if len(part)]
-    physics_lanes = [physics, *(copy.deepcopy(physics) for _ in range(len(parts) - 1))]
+    executor_mode = os.environ.get("GCNM_PHYSICS_EXECUTOR", "thread").lower()
+    if executor_mode not in {"thread", "process"}:
+        raise ValueError("GCNM_PHYSICS_EXECUTOR must be 'thread' or 'process'")
     cached = None if baseline_voltages is None else np.asarray(baseline_voltages)
+    if executor_mode == "process":
+        if "fork" not in mp.get_all_start_methods():
+            raise RuntimeError(
+                "process physics requires the POSIX fork start method"
+            )
+        global _PROCESS_RESIDUAL_STATE
+        _PROCESS_RESIDUAL_STATE = (
+            physics,
+            np.asarray(sigma_baseline),
+            np.asarray(delta_current),
+            np.asarray(delta_voltage_measured),
+            float(minimum_conductivity),
+            cached,
+        )
+        try:
+            with mp.get_context("fork").Pool(processes=len(parts)) as pool:
+                results = pool.map(_process_residual_lane, parts)
+        finally:
+            _PROCESS_RESIDUAL_STATE = None
+        return (
+            np.concatenate([result[0] for result in results]),
+            np.concatenate([result[1] for result in results], axis=0),
+            sum(result[2] for result in results),
+        )
+    physics_lanes = [physics, *(copy.deepcopy(physics) for _ in range(len(parts) - 1))]
 
     def run(lane: int, indices: np.ndarray):
         return dataset_voltage_residual_rms(

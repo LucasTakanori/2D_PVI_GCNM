@@ -19,6 +19,7 @@ from gcnm_pvi.gcnm_mesh_maps import MeshMappings
 
 
 FRAMES_PER_BEAT = 50
+TISSUE_CLASS_COUNT = 9
 
 
 def _args() -> argparse.Namespace:
@@ -94,8 +95,9 @@ def _render_card(
         "Full": np.sqrt(np.mean(full_sigma * full_sigma, axis=1)),
     }
     peak = int(np.argmax(sigma_rms["Full"]))
-    tissue = np.rint(_image(mappings, hp["tissue_labels"][0])).astype(float)
-    tissue[~np.isfinite(tissue)] = np.nan
+    tissue = mappings.categorical_to_image_grid(
+        hp["tissue_labels"][0], num_classes=TISSUE_CLASS_COUNT
+    )
     spatial = np.stack(
         [
             _image(mappings, hp_sigma[peak]),

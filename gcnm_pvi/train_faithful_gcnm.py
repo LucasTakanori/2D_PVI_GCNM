@@ -17,6 +17,7 @@ from torch_geometric.loader import DataLoader
 
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
+from gcnm_pvi.dual_mesh_physics import ProjectedFineMeshPhysics
 from gcnm_pvi.gcnm_model import (
     GCNBlock,
     PhysicsProposalResidualGCNBlock,
@@ -519,6 +520,16 @@ def main() -> None:
             "F(sigma)-V_absolute and predicts absolute conductivity"
         ),
     )
+    parser.add_argument(
+        "--physics-mesh-mode",
+        choices=["coarse", "projected_fine"],
+        default="coarse",
+        help=(
+            "coarse evaluates F and J directly on the inverse mesh; "
+            "projected_fine evaluates F_f(P sigma_c) and uses J_f P while "
+            "retaining coarse conductivity updates and graph nodes"
+        ),
+    )
     parser.add_argument("--baseline-conductivity", type=float, default=0.7)
     parser.add_argument("--allow-overwrite", action="store_true")
     args = parser.parse_args()
@@ -529,7 +540,19 @@ def main() -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    runtime = build_runtime(cfg, include_forward=False)
+    runtime = build_runtime(
+        cfg, include_forward=args.physics_mesh_mode == "projected_fine"
+    )
+    if args.physics_mesh_mode == "projected_fine":
+        if runtime["mappings"].c2f is None:
+            raise ValueError(
+                "projected-fine training requires a coarse-to-fine mapping"
+            )
+        stage_physics = ProjectedFineMeshPhysics(
+            runtime["physics_fwd"], runtime["mappings"].c2f
+        )
+    else:
+        stage_physics = runtime["physics_inv"]
     train = _load(
         args.train,
         args.max_train,
@@ -576,7 +599,7 @@ def main() -> None:
     )
     fixed_first_stage = (
         FixedZeroCurrentLMSolver(
-            runtime["physics_inv"],
+            stage_physics,
             np.full(runtime["mappings"].num_elements, args.baseline_conductivity),
             regularizer=runtime["mappings"].laplace,
             hyper_pvi=cfg.hyper_pvi,
@@ -597,6 +620,7 @@ def main() -> None:
     args.results_dir.mkdir(parents=True, exist_ok=True)
     artifact_hashes = {
         "config_sha256": _sha256(args.config),
+        "mesh_forward_sha256": _sha256(Path(cfg.mesh_fwd_h5)),
         "mesh_inverse_sha256": _sha256(Path(cfg.mesh_inv_h5)),
         "mappings_sha256": _sha256(Path(cfg.mappings_h5)),
         "train_dataset_sha256": _sha256(args.train),
@@ -657,7 +681,7 @@ def main() -> None:
         elif args.physics_contract == "absolute":
             direction_train, diag_train, baseline_train = (
                 parallel_dataset_absolute_lm_directions(
-                    runtime["physics_inv"],
+                    stage_physics,
                     current_train,
                     train["V"],
                     regularizer=runtime["mappings"].laplace,
@@ -676,7 +700,7 @@ def main() -> None:
             else:
                 direction_validation, diag_validation, baseline_validation = (
                     parallel_dataset_absolute_lm_directions(
-                    runtime["physics_inv"],
+                        stage_physics,
                     current_validation,
                     validation["V"],
                     regularizer=runtime["mappings"].laplace,
@@ -690,7 +714,7 @@ def main() -> None:
             )
         else:
             direction_train, diag_train, baseline_train = parallel_dataset_lm_directions(
-                runtime["physics_inv"],
+                stage_physics,
                 train["sigma_baseline"],
                 current_train,
                 train["V"],
@@ -710,7 +734,7 @@ def main() -> None:
             else:
                 direction_validation, diag_validation, baseline_validation = (
                     parallel_dataset_lm_directions(
-                    runtime["physics_inv"],
+                        stage_physics,
                     validation["sigma_baseline"],
                     current_validation,
                     validation["V"],
@@ -905,15 +929,23 @@ def main() -> None:
                 "dice_supervision": "clean synthetic targets only",
             },
             "physics": (
-                "nonlinear absolute F/J/LM recomputed at every stage"
+                f"{args.physics_mesh_mode} nonlinear absolute F/J/LM "
+                "recomputed at every stage"
                 if args.physics_contract == "absolute"
-                else "nonlinear differential F/J/LM recomputed at every stage"
+                else f"{args.physics_mesh_mode} nonlinear differential F/J/LM "
+                "recomputed at every stage"
             ),
             "best_epoch": best_epoch,
             "best_selection_score": best_score,
             "physics_contract": {
                 "baseline_mode": args.baseline_mode,
                 "measurement_contract": args.physics_contract,
+                "physics_mesh_mode": args.physics_mesh_mode,
+                "forward_model": (
+                    "F_f(P sigma_c) with chain-rule Jacobian J_f P"
+                    if args.physics_mesh_mode == "projected_fine"
+                    else "F_c(sigma_c) with directly computed coarse Jacobian J_c"
+                ),
                 "baseline_conductivity": args.baseline_conductivity,
                 "hyper_pvi": cfg.hyper_pvi,
                 "lambda_lm": cfg.lambda_lm,
@@ -972,6 +1004,7 @@ def main() -> None:
         "random_seed": seed,
         "baseline_mode": args.baseline_mode,
         "physics_contract": args.physics_contract,
+        "physics_mesh_mode": args.physics_mesh_mode,
         "baseline_conductivity": args.baseline_conductivity,
         "physics_stages": physics_reports,
         "artifact_hashes": artifact_hashes,

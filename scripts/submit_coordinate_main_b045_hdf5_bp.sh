@@ -47,9 +47,9 @@ finalize_job="$(sbatch --parsable \
 bp_job="$(sbatch --parsable --dependency="afterok:${finalize_job}" \
   --export="ALL,REPO_ROOT=${REPO_ROOT},TASK_MANIFEST=${TASK_MANIFEST},PVI_ML_ROOT=${PVI_ML_ROOT},SPLIT_MANIFEST=${SPLIT_MANIFEST},ARTIFACT_ROOT=${ARTIFACT_ROOT}" \
   slurm/launch_train_coordinate_main_b045_bp_packed.sh)"
-gif_job="$(sbatch --parsable --array=0-363%8 --dependency="afterok:${bp_job}" \
+gif_job="$(sbatch --parsable --array=0-363%16 --dependency="afterok:${bp_job}" \
   --export="ALL,REPO_ROOT=${REPO_ROOT},TASK_MANIFEST=${TASK_MANIFEST},SPLIT_MANIFEST=${SPLIT_MANIFEST},ARTIFACT_ROOT=${ARTIFACT_ROOT}" \
-  slurm/launch_coordinate_main_b045_bp_gifs.sh)"
+  slurm/launch_coordinate_main_b045_bp_gifs_parallel.sh)"
 
 echo "Parquet/HDF5 validation: ${finalize_job}"
 echo "364 packed BP runs: ${bp_job}"

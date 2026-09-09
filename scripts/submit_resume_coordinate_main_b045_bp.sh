@@ -26,9 +26,9 @@ smoke_job="$(sbatch --parsable --export="${exports}" \
   slurm/launch_smoke_coordinate_main_b045_bp_postprocess.sh)"
 bp_job="$(sbatch --parsable --dependency="afterok:${smoke_job}" \
   --export="${exports}" slurm/launch_train_coordinate_main_b045_bp_packed.sh)"
-gif_job="$(sbatch --parsable --array=0-363%8 --dependency="afterok:${bp_job}" \
+gif_job="$(sbatch --parsable --array=0-363%16 --dependency="afterok:${bp_job}" \
   --export="ALL,REPO_ROOT=${REPO_ROOT},TASK_MANIFEST=${TASK_MANIFEST},SPLIT_MANIFEST=${SPLIT_MANIFEST},ARTIFACT_ROOT=${ARTIFACT_ROOT}" \
-  slurm/launch_coordinate_main_b045_bp_gifs.sh)"
+  slurm/launch_coordinate_main_b045_bp_gifs_parallel.sh)"
 
 echo "CPU artifact-export smoke: ${smoke_job}"
 echo "resumable packed BP matrix: ${bp_job}"

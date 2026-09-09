@@ -14,6 +14,7 @@ import torch
 
 from gcnm_pvi.anatomical_phantoms import element_positions
 from gcnm_pvi.config import GcnmConfig
+from gcnm_pvi.dual_mesh_physics import ProjectedFineMeshPhysics
 from gcnm_pvi.iterative_physics import (
     diagnostics_summary,
     iterative_lm_reconstruction,
@@ -244,16 +245,33 @@ def main() -> None:
         default=None,
         help="Multiply saved V before physical inversion; defaults to -1 for PVI pseudo-label packs and +1 for synthetic data",
     )
+    parser.add_argument(
+        "--physics-mesh-mode",
+        choices=["auto", "coarse", "projected_fine"],
+        default="auto",
+        help=(
+            "auto follows the checkpoint contract; an explicit override is a "
+            "fixed-weight physics sensitivity test and does not change weights"
+        ),
+    )
     parser.add_argument("--minimum-conductivity", type=float, default=1e-4)
     parser.add_argument(
         "--skip-lm-control",
         action="store_true",
         help="Skip the model-independent LM control when it has already been evaluated on the identical test pack",
     )
+    parser.add_argument(
+        "--allow-config-hash-mismatch",
+        action="store_true",
+        help=(
+            "permit only the whole-file config hash to differ while still "
+            "requiring the forward mesh, inverse mesh, mappings, and numerical "
+            "physics contract to match"
+        ),
+    )
     args = parser.parse_args()
 
     cfg = GcnmConfig.from_yaml(args.config)
-    runtime = build_runtime(cfg, include_forward=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     first_checkpoint = torch.load(
         args.models_dir / f"{args.model_name}_0.pt",
@@ -261,13 +279,44 @@ def main() -> None:
         weights_only=True,
     )
     contract = first_checkpoint.get("physics_contract", {})
+    trained_physics_mesh_mode = contract.get("physics_mesh_mode", "coarse")
+    physics_mesh_mode = (
+        trained_physics_mesh_mode
+        if args.physics_mesh_mode == "auto"
+        else args.physics_mesh_mode
+    )
+    if physics_mesh_mode not in {"coarse", "projected_fine"}:
+        raise ValueError(
+            f"unsupported checkpoint physics mesh mode {physics_mesh_mode!r}"
+        )
+    runtime = build_runtime(
+        cfg, include_forward=physics_mesh_mode == "projected_fine"
+    )
+    if physics_mesh_mode == "projected_fine":
+        if runtime["mappings"].c2f is None:
+            raise ValueError(
+                "projected-fine evaluation requires a coarse-to-fine mapping"
+            )
+        stage_physics = ProjectedFineMeshPhysics(
+            runtime["physics_fwd"], runtime["mappings"].c2f
+        )
+    else:
+        stage_physics = runtime["physics_inv"]
     current_hashes = {
         "config_sha256": _sha256(args.config),
+        "mesh_forward_sha256": _sha256(Path(cfg.mesh_fwd_h5)),
         "mesh_inverse_sha256": _sha256(Path(cfg.mesh_inv_h5)),
         "mappings_sha256": _sha256(Path(cfg.mappings_h5)),
     }
     for key, actual in current_hashes.items():
         if key in contract and contract[key] != actual:
+            if key == "config_sha256" and args.allow_config_hash_mismatch:
+                print(
+                    "warning: allowing whole-file config hash mismatch; "
+                    "mesh, mappings, and numerical physics fields remain validated",
+                    flush=True,
+                )
+                continue
             raise ValueError(
                 f"checkpoint physics contract {key} does not match evaluation artifact"
             )
@@ -326,7 +375,7 @@ def main() -> None:
             np.maximum(baselines + current, float(args.minimum_conductivity)) - baselines
         )
         direction, diagnostics, baseline_voltages = parallel_dataset_lm_directions(
-            runtime["physics_inv"],
+            stage_physics,
             baselines,
             current,
             measured,
@@ -389,7 +438,7 @@ def main() -> None:
         model.load_state_dict(checkpoint["state_dict"])
         current = _predict(model, dataset, float(checkpoint["scale"]))
         residuals, baseline_voltages, final_clips = parallel_dataset_voltage_residual_rms(
-            runtime["physics_inv"],
+            stage_physics,
             baselines,
             current,
             measured,
@@ -409,7 +458,7 @@ def main() -> None:
         lm_diagnostics = []
     else:
         lm_stages, lm_diagnostics = iterative_lm_reconstruction(
-            runtime["physics_inv"],
+            stage_physics,
             baselines,
             measured,
             iterations=iterations,
@@ -424,7 +473,7 @@ def main() -> None:
     lm_baselines = None
     for iteration in range(len(lm_stages)):
         residuals, lm_baselines, clips = parallel_dataset_voltage_residual_rms(
-            runtime["physics_inv"],
+            stage_physics,
             baselines,
             lm_stages[iteration],
             measured,
@@ -446,7 +495,7 @@ def main() -> None:
         saved_newton_metrics = _metrics(old_newton, truth, runtime["mappings"])
         newton_residuals, _newton_baselines, saved_newton_clipped_elements = (
             parallel_dataset_voltage_residual_rms(
-                runtime["physics_inv"],
+                stage_physics,
                 baselines,
                 old_newton,
                 measured,
@@ -488,6 +537,11 @@ def main() -> None:
         ),
         "samples": int(len(truth)),
         "per_stage_physics_recomputed": True,
+        "physics_mesh_mode": physics_mesh_mode,
+        "trained_physics_mesh_mode": trained_physics_mesh_mode,
+        "fixed_weight_physics_mesh_override": (
+            physics_mesh_mode != trained_physics_mesh_mode
+        ),
         "iterative_lm_control_executed": not args.skip_lm_control,
         "baseline_source": (
             "anatomical baseline supplied by the evaluation pack"
