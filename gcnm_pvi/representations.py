@@ -21,6 +21,7 @@ from gcnm_pvi.coordinate_runtime import (
 )
 from gcnm_pvi.iterative_physics import (
     FixedZeroCurrentLMSolver,
+    LM_SOLVER_IMPLEMENTATION,
     LowRankRegularizedSolver,
     dataset_lm_directions,
     dataset_voltage_residual_rms,
@@ -627,8 +628,15 @@ class CoordinateReconstructor:
             residual_seconds = 0.0
         frame_indices = np.arange(len(measured), dtype=np.int64)
         return stage_1, stage_2, {
+            "lm_solver_implementation": LM_SOLVER_IMPLEMENTATION,
             "stage_1_forward_voltage_rms": np.asarray(
                 [item.voltage_residual_rms for item in diagnostics_2]
+            ),
+            "stage_1_clipped_elements": np.asarray(
+                [item.clipped_elements for item in diagnostics_2], dtype=np.int64
+            ),
+            "stage_2_lm_step_rms": np.asarray(
+                [item.step_rms for item in diagnostics_2], dtype=np.float64
             ),
             "stage_2_forward_voltage_rms": np.asarray(residual_2),
             "stage_2_forward_voltage_rms_stride": residual_stride,

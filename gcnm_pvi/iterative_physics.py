@@ -18,6 +18,9 @@ import numpy as np
 from scipy import linalg, sparse
 
 
+LM_SOLVER_IMPLEMENTATION = "measurement_svd_v1"
+
+
 _PROCESS_LM_STATE = None
 _PROCESS_RESIDUAL_STATE = None
 
@@ -120,96 +123,179 @@ class LowRankRegularizedSolver:
                 "low-rank LM solver supports at most one regularizer null mode"
             )
 
-    def _positive_solve(
-        self, projected_jacobian: np.ndarray, rhs: np.ndarray
-    ) -> np.ndarray:
-        """Apply ``(D + J.T J)^-1`` in the positive eigen-subspace.
+    @staticmethod
+    def _svd(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute a thin SVD, retaining the existing robust LAPACK fallback."""
 
-        The SVD form avoids subtracting two very large Woodbury terms when the
-        scaled Laplacian eigenvalues are small.
-        """
-
-        rhs_2d = np.asarray(rhs, dtype=np.float64)
-        was_vector = rhs_2d.ndim == 1
-        if was_vector:
-            rhs_2d = rhs_2d[:, None]
-        inverse_sqrt = np.sqrt(self.positive_inverse)
-        whitened_jacobian = projected_jacobian * inverse_sqrt[None, :]
-        if not np.all(np.isfinite(whitened_jacobian)):
-            raise FloatingPointError(
-                "non-finite whitened Jacobian in low-rank LM solve"
-            )
         try:
-            _u, singular, vh = linalg.svd(
-                whitened_jacobian,
+            return linalg.svd(
+                matrix,
                 full_matrices=False,
                 check_finite=False,
                 lapack_driver="gesdd",
             )
         except linalg.LinAlgError:
-            # LAPACK's divide-and-conquer driver can rarely fail to converge
-            # on a finite, strongly scaled real frame.  The QR-based driver is
-            # slower but more robust and computes the same SVD.  Normal frames
-            # never enter this branch, preserving the optimized pilot path.
-            _u, singular, vh = linalg.svd(
-                whitened_jacobian,
+            return linalg.svd(
+                matrix,
                 full_matrices=False,
                 check_finite=False,
                 lapack_driver="gesvd",
             )
-        def apply_inverse(values: np.ndarray) -> np.ndarray:
-            whitened_rhs = inverse_sqrt[:, None] * values
-            coefficients = vh @ whitened_rhs
-            # Split row-space and orthogonal-space components explicitly.
-            orthogonal = whitened_rhs - vh.T @ coefficients
-            retained = coefficients / (1.0 + singular[:, None] ** 2)
-            return inverse_sqrt[:, None] * (orthogonal + vh.T @ retained)
 
-        result = apply_inverse(rhs_2d)
-        # Mixed scales (h^2 L versus J.T J) make the closed-form application
-        # sensitive to roundoff. A few cheap refinement steps restore the
-        # residual to the dense equation without another factorization.
-        for _ in range(6):
-            residual = rhs_2d - (
-                self.positive_values[:, None] * result
-                + projected_jacobian.T @ (projected_jacobian @ result)
+    @staticmethod
+    def _measurement_components(
+        vectors: np.ndarray, left_vectors: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Split measurement vectors into SVD row-space and its complement."""
+
+        coefficients = left_vectors.T @ vectors
+        if left_vectors.shape[0] == left_vectors.shape[1]:
+            # A thin U is square when measurements <= regularized elements, as
+            # in the 32-by-971 PVI system.  Its complement is mathematically
+            # empty; manufacturing one from v-UU.Tv injects roundoff into the
+            # null observability calculation when singular values are large.
+            orthogonal = np.zeros_like(vectors)
+        else:
+            orthogonal = vectors - left_vectors @ coefficients
+        return coefficients, orthogonal
+
+    def _measurement_space_solve(
+        self, jacobian: np.ndarray, residual: np.ndarray
+    ) -> np.ndarray:
+        """Solve the regularized least-squares problem without normal equations.
+
+        In positive-regularizer coordinates, write ``p = Q D^-1/2 z + N t``
+        and ``W = J Q D^-1/2``.  Eliminating ``z`` leaves the scalar null-mode
+        denominator ``q.T (I + W W.T)^-1 q``.  Evaluating it as a weighted sum
+        of squares avoids the catastrophic Schur subtraction in the former
+        implementation.
+        """
+
+        inverse_sqrt = np.sqrt(self.positive_inverse)
+        positive_jacobian = jacobian @ self.positive_vectors
+        whitened_jacobian = positive_jacobian * inverse_sqrt[None, :]
+        if not np.all(np.isfinite(whitened_jacobian)):
+            raise FloatingPointError(
+                "non-finite whitened Jacobian in low-rank LM solve"
             )
-            result = result + apply_inverse(residual)
-        return result[:, 0] if was_vector else result
+        left, singular, vh = self._svd(whitened_jacobian)
+        residual_coefficients, residual_orthogonal = self._measurement_components(
+            residual, left
+        )
+        weights = 1.0 / (1.0 + singular**2)
+
+        adjusted_residual = residual
+        null_solution = np.empty(0, dtype=np.float64)
+        if self.null_vectors.shape[1]:
+            null_jacobian = (jacobian @ self.null_vectors).ravel()
+            null_coefficients, null_orthogonal = self._measurement_components(
+                null_jacobian, left
+            )
+            denominator = float(
+                np.dot(null_orthogonal, null_orthogonal)
+                + np.dot(weights, null_coefficients**2)
+            )
+            numerator = float(
+                np.dot(null_orthogonal, residual_orthogonal)
+                + np.dot(weights * null_coefficients, residual_coefficients)
+            )
+            null_sensitivity = float(np.dot(null_jacobian, null_jacobian))
+            if (
+                not np.isfinite(denominator)
+                or denominator <= 0.0
+                or null_sensitivity <= np.finfo(np.float64).tiny
+            ):
+                raise linalg.LinAlgError(
+                    "the regularizer null mode is numerically unobservable"
+                )
+            null_solution = np.asarray([-numerator / denominator])
+            adjusted_residual = residual + null_jacobian * null_solution[0]
+
+        adjusted_coefficients = left.T @ adjusted_residual
+        z = -(vh.T @ ((singular * weights) * adjusted_coefficients))
+        positive_solution = inverse_sqrt * z
+        result = self.positive_vectors @ positive_solution
+        if null_solution.size:
+            result = result + self.null_vectors @ null_solution
+        return result
+
+    def _backward_error(
+        self, jacobian: np.ndarray, residual: np.ndarray, solution: np.ndarray
+    ) -> float:
+        """Return a scaled normal-equation residual for a candidate solution."""
+
+        projected = self.positive_vectors.T @ solution
+        regularized = self.positive_vectors @ (self.positive_values * projected)
+        voltage_residual = jacobian @ solution + residual
+        gradient = jacobian.T @ voltage_residual + regularized
+        scale = (
+            linalg.norm(jacobian, ord="fro") * linalg.norm(voltage_residual)
+            + linalg.norm(regularized)
+            + linalg.norm(jacobian.T @ residual)
+        )
+        return float(linalg.norm(gradient) / max(scale, np.finfo(np.float64).tiny))
+
+    def _augmented_solve(
+        self, jacobian: np.ndarray, residual: np.ndarray
+    ) -> np.ndarray:
+        """Exceptional rank-checked oracle for the identical LS objective."""
+
+        regularizer_sqrt = (
+            np.sqrt(self.positive_values)[:, None] * self.positive_vectors.T
+        )
+        matrix = np.vstack((jacobian, regularizer_sqrt))
+        rhs = np.concatenate((-residual, np.zeros(len(self.positive_values))))
+        solution, _residuals, rank, _singular = linalg.lstsq(
+            matrix, rhs, check_finite=False, lapack_driver="gelsd"
+        )
+        if rank != jacobian.shape[1]:
+            raise linalg.LinAlgError(
+                "regularized LM system is rank deficient; null mode is unobservable"
+            )
+        return np.asarray(solution, dtype=np.float64)
 
     def solve(self, jacobian: np.ndarray, residual: np.ndarray) -> np.ndarray:
         jacobian = np.asarray(jacobian, dtype=np.float64)
         residual = np.asarray(residual, dtype=np.float64).ravel()
-        positive_jacobian = jacobian @ self.positive_vectors
-        positive_rhs = -(positive_jacobian.T @ residual)
-        if self.null_vectors.shape[1] == 0:
-            positive_solution = self._positive_solve(
-                positive_jacobian, positive_rhs
+        if jacobian.ndim != 2:
+            raise ValueError("Jacobian must be a two-dimensional array")
+        if residual.shape != (jacobian.shape[0],):
+            raise ValueError(
+                f"residual shape {residual.shape} does not match "
+                f"{jacobian.shape[0]} Jacobian measurements"
             )
-            return self.positive_vectors @ positive_solution
+        if jacobian.shape[1] != self.positive_vectors.shape[0]:
+            raise ValueError(
+                f"Jacobian has {jacobian.shape[1]} elements; solver requires "
+                f"{self.positive_vectors.shape[0]}"
+            )
+        if not np.all(np.isfinite(jacobian)) or not np.all(np.isfinite(residual)):
+            raise ValueError("low-rank LM inputs must be finite")
 
-        null_jacobian = jacobian @ self.null_vectors
-        null_rhs = -(null_jacobian.T @ residual)
-        coupling = positive_jacobian.T @ null_jacobian
-        solved = self._positive_solve(
-            positive_jacobian,
-            np.column_stack((positive_rhs, coupling)),
-        )
-        positive_base = solved[:, 0]
-        positive_coupling = solved[:, 1:]
-        null_block = null_jacobian.T @ null_jacobian
-        schur = null_block - coupling.T @ positive_coupling
-        null_solution = linalg.solve(
-            schur,
-            null_rhs - coupling.T @ positive_base,
-            assume_a="sym",
-            check_finite=False,
-        )
-        positive_solution = positive_base - positive_coupling @ null_solution
-        return (
-            self.positive_vectors @ positive_solution
-            + self.null_vectors @ null_solution
-        )
+        try:
+            solution = self._measurement_space_solve(jacobian, residual)
+            error = self._backward_error(jacobian, residual, solution)
+            if (
+                not np.all(np.isfinite(solution))
+                or not np.isfinite(error)
+                or error > 1e-7
+            ):
+                raise FloatingPointError(
+                    f"measurement-space LM solve failed validation ({error=:.3e})"
+                )
+            return solution
+        except (FloatingPointError, linalg.LinAlgError):
+            solution = self._augmented_solve(jacobian, residual)
+            error = self._backward_error(jacobian, residual, solution)
+            if (
+                not np.all(np.isfinite(solution))
+                or not np.isfinite(error)
+                or error > 1e-7
+            ):
+                raise FloatingPointError(
+                    f"augmented LM solve failed validation ({error=:.3e})"
+                )
+            return solution
 
 
 class FixedZeroCurrentLMSolver:

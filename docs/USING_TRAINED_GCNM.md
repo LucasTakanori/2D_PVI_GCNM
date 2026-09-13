@@ -18,12 +18,17 @@ weights are not committed. A checkpoint is tied to its configuration and mesh
 files by SHA-256 hashes, so a model trained for one ring must not be used with a
 different ring.
 
-Use the validated source version:
+Use the corrected numerical runtime (0.3.1 or newer). The older
+`validated-batch50-20260909` tag predates the ill-conditioned-frame fix:
+
+See [runtime 0.3.1 validation and live-data limitations](NUMERICAL_RUNTIME_031.md)
+for what was corrected, what stayed unchanged, and what the replay checks establish.
 
 ```bash
 git clone https://github.com/LucasTakanori/2D_PVI_GCNM.git
 cd 2D_PVI_GCNM
-git checkout validated-batch50-20260909
+git switch main
+git pull --ff-only
 
 python -m venv .venv
 source .venv/bin/activate
@@ -84,38 +89,48 @@ with np.load("test.npz", allow_pickle=False) as source:
     voltage_50x32 = np.asarray(source["V"][:50], dtype=np.float64)
 ```
 
-For production PVI files in which differential resistance is stored as
-`(32, frames)`, use the shared sign convention instead of hardcoding a sign:
+For the archived experimental PVI H5 files, HP and LP resistance are stored as
+`(32, frames)`. Their sum is filtered **absolute** resistance, not an already
+referenced model input. To reproduce the projected-fine experimental exports,
+convert it to volts and use the first frame of the selected five-beat window
+as the reference, with the historical export sign:
 
 ```python
 import h5py
 import numpy as np
 
-from gcnm_pvi.hp_lp_signals import resistance_to_voltage
-
 with h5py.File("participant.h5", "r") as source:
     resistance_hp = np.asarray(
-        source["data/pviHP/resistance"][:, :50], dtype=np.float64
+        source["data/pviHP/resistance"][:, :250], dtype=np.float64
     )
     resistance_lp = np.asarray(
-        source["data/pviLP/resistance"][:, :50], dtype=np.float64
+        source["data/pviLP/resistance"][:, :250], dtype=np.float64
     )
 
-voltage_50x32 = resistance_to_voltage(resistance_hp + resistance_lp).T
+absolute_voltage = (0.01 * (resistance_hp + resistance_lp)).T
+window_model_voltage = -(absolute_voltage - absolute_voltage[:1])
+voltage_50x32 = window_model_voltage[:50]
 assert voltage_50x32.shape == (50, 32)
 ```
 
-`resistance_to_voltage` applies `delta_V = -I * delta_R` with the production
-current `I=-0.01 A`. If a different current or preprocessing pipeline was used,
-make that conversion before inference and verify it against the checkpoint's
-training contract. The example combines HP and LP for the full differential
-model. If a checkpoint was deliberately trained on only one temporal
-component, supply that same component instead.
+This conversion is specific to the archived current/sign convention:
+`I=-0.01 A`, stored `R=-Re(V)/I`, and experimental model input
+`-(V-V_reference)`. It corrects the earlier tutorial's missing reference and
+opposite sign. It is not a display transformation and must not be applied again
+to synthetic `V` arrays, which are already model inputs. Different acquisition
+hardware must be checked against this convention on matched measurements.
 
-Some older exported real-data NPZ packs stored a display-oriented voltage sign
-and their evaluation scripts flipped it before the physics calculation. Do not
-copy that flip onto synthetic `V` arrays or onto the raw-resistance conversion
-above. Check the provenance of an older NPZ before using it directly.
+The first-frame reference stays fixed across the whole window: use
+`window_model_voltage[50:100]` for the next compute chunk, without referencing
+that chunk again. Select an accepted five-beat window from the H5 mask when
+reproducing a particular export; the first 250 samples above merely illustrate
+the conversion. HP+LP retains the full signal; feeding only HP would change the
+reconstructed quantity.
+
+The H5 has already undergone zero-phase 5 Hz filtering and beat resampling.
+Do not filter it a second time when checking archived-output parity. A live
+50 Hz stream with causal filtering is a separate, explicitly approximate
+temporal preprocessing contract, not 50 samples per detected beat.
 
 ## 4. Reconstruct one 50-frame beat/buffer
 

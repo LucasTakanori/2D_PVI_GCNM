@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvi-gcnm"
-version = "0.3.0"
+version = "0.3.1"
 description = "Graph-convolutional Newton reconstruction for two-dimensional PVI"
 readme = "README.md"
 requires-python = ">=3.10"

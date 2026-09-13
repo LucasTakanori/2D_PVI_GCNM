@@ -67,8 +67,12 @@ class _ParallelStage:
     def lm_directions(self, baseline, current, measured, **kwargs):
         direction = _direction(current, measured)
         diagnostics = [
-            SimpleNamespace(voltage_residual_rms=value)
-            for value in _residual(current, measured)
+            SimpleNamespace(
+                voltage_residual_rms=value,
+                step_rms=float(np.sqrt(np.mean(direction[index] ** 2))),
+                clipped_elements=index,
+            )
+            for index, value in enumerate(_residual(current, measured))
         ]
         return direction, diagnostics, kwargs["baseline_voltages"]
 
@@ -116,8 +120,12 @@ def reconstructor(monkeypatch) -> CoordinateReconstructor:
     ):
         direction = _direction(current, measured)
         diagnostics = [
-            SimpleNamespace(voltage_residual_rms=value)
-            for value in _residual(current, measured)
+            SimpleNamespace(
+                voltage_residual_rms=value,
+                step_rms=float(np.sqrt(np.mean(direction[index] ** 2))),
+                clipped_elements=index,
+            )
+            for index, value in enumerate(_residual(current, measured))
         ]
         if baseline_voltages is None:
             baseline_voltages = np.zeros_like(measured)
@@ -172,6 +180,14 @@ def test_batch_matches_framewise_reference_in_original_order(
     np.testing.assert_array_equal(
         diagnostics["stage_2_forward_voltage_rms_indices"], np.arange(frames)
     )
+    np.testing.assert_array_equal(
+        diagnostics["stage_1_clipped_elements"], np.arange(frames)
+    )
+    np.testing.assert_allclose(
+        diagnostics["stage_2_lm_step_rms"],
+        np.sqrt(np.mean(_direction(stage_1, voltage) ** 2, axis=1)),
+    )
+    assert diagnostics["lm_solver_implementation"] == "measurement_svd_v1"
     assert diagnostics["batch"] == {
         "frames": frames,
         "measurements": MEASUREMENTS,
